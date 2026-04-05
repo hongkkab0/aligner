@@ -4,7 +4,7 @@ from PyQt5.QtCore import *
 
 import logging
 import traceback
-from aligner_gui.utils import const
+from aligner_gui.shared import const
 
 TRAIN_LOGGER = logging.getLogger("aligner.trainer")
 
@@ -72,3 +72,4 @@ class ThreadTrain(QThread):
             self.callback_status,
             resume=self._resume_training,
         )
+
