@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 import traceback
-from typing import Callable, Optional, TypedDict
+from typing import TYPE_CHECKING, Callable, Optional, TypedDict
 
 from PyQt5.QtCore import QTimer, pyqtSignal
 
@@ -14,6 +14,9 @@ from aligner_gui.shared import const
 from aligner_gui.viewmodels.base_viewmodel import ViewModelBase
 from aligner_engine.const import PHASE_TYPE_TRAINING, PHASE_TYPE_VALIDATION
 from aligner_engine.project_settings import ProjectSettings
+
+if TYPE_CHECKING:
+    from aligner_gui.interfaces.training import ITrainerSession, ITrainingThread
 
 TRAIN_LOGGER = logging.getLogger("aligner.trainer")
 
@@ -73,15 +76,21 @@ class TrainerViewModel(ViewModelBase):
 
     def __init__(
         self,
-        session,
+        session: "ITrainerSession",
         tester_reload_callback: Optional[Callable[[], None]] = None,
+        *,
+        training_thread: "ITrainingThread | None" = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._session = session
         self._tester_reload_callback = tester_reload_callback
 
-        self._th_train = ThreadTrain(self._session)
+        # Dependency injection: accept an externally-supplied thread (e.g. a
+        # test double) or fall back to the real ThreadTrain.
+        self._th_train: "ITrainingThread" = (
+            training_thread if training_thread is not None else ThreadTrain(self._session)
+        )
         self._th_train.qt_signal_stop_training.connect(self._on_thread_stopped)
         self._th_train.qt_signal_update_epoch.connect(self._on_thread_epoch_updated)
         self._th_train.qt_signal_update_iter.connect(self._on_thread_iter_updated)

@@ -3,12 +3,16 @@ from __future__ import annotations
 import logging
 import os
 import traceback
+from typing import TYPE_CHECKING
 
 from PyQt5.QtCore import pyqtSignal
 
 from aligner_gui.tester.thread_test import ThreadTest
 from aligner_gui.shared import const
 from aligner_gui.viewmodels.base_viewmodel import ViewModelBase
+
+if TYPE_CHECKING:
+    from aligner_gui.interfaces.testing import ITesterSession, ITestingThread
 
 TEST_LOGGER = logging.getLogger("aligner.tester")
 
@@ -35,13 +39,23 @@ class TesterViewModel(ViewModelBase):
     test_blocked = pyqtSignal(str, str)         # (title, message) — view shows a dialog
     file_list_changed = pyqtSignal()            # emitted after any mutation to _file_list
 
-    def __init__(self, session, parent=None) -> None:
+    def __init__(
+        self,
+        session: "ITesterSession",
+        *,
+        testing_thread: "ITestingThread | None" = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._session = session
-        self._th_test = ThreadTest(self._session)
         self._file_list: list[str] = []
         self._test_result_summary = None
 
+        # Dependency injection: accept an external thread (e.g. a test double)
+        # or fall back to the real ThreadTest.
+        self._th_test: "ITestingThread" = (
+            testing_thread if testing_thread is not None else ThreadTest(self._session)
+        )
         self._th_test.qt_signal_stop_testing.connect(self._on_thread_stopped)
         self._th_test.qt_signal_update_iter.connect(self._on_thread_iter_updated)
         self._th_test.qt_signal_update_test_result_summary.connect(self._on_thread_results_ready)
