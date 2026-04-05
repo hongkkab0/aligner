@@ -1,0 +1,1 @@
+from aligner_engine.deploy_openvio import deploy_openvino

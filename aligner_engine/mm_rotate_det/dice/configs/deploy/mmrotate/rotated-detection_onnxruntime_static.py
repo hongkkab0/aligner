@@ -1,0 +1,1 @@
+_base_ = ['./rotated-detection_static.py', '../_base_/backends/onnxruntime.py']
