@@ -61,18 +61,14 @@ class TrainerView(QWidget, Ui_trainer_widget):
 
     def __init__(
         self,
-        main_window,
         session,
         tester_reload_callback: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
         self.setupUi(self)
-        from aligner_gui.main_window import MainWindow
-        self._main_window: MainWindow = main_window
 
         # ViewModel — no view reference passed in
-        self._vm = TrainerViewModel(session, tester_reload_callback, parent=self)
-        self._vm.status_message_requested.connect(self._main_window.statusBar().showMessage)
+        self.viewmodel = TrainerViewModel(session, tester_reload_callback, parent=self)
 
         # ------------------------------------------------------------------
         # Extra widgets not in the .ui file
@@ -102,7 +98,7 @@ class TrainerView(QWidget, Ui_trainer_widget):
         # ------------------------------------------------------------------
         # Sync initial UI state from settings
         # ------------------------------------------------------------------
-        settings = self._vm.get_settings()
+        settings = self.viewmodel.get_settings()
         self.check_hflip.setChecked(settings.aug_flip_horizontal_use)
         self.check_vflip.setChecked(settings.aug_flip_vertical_use)
         self.check_no_rotation.setChecked(settings.no_rotation)
@@ -116,36 +112,35 @@ class TrainerView(QWidget, Ui_trainer_widget):
         # ------------------------------------------------------------------
         self.btn_train.clicked.connect(self._clicked_btn_train)
         self.check_hflip.clicked.connect(
-            lambda: self._vm.update_setting(aug_flip_horizontal_use=self.check_hflip.isChecked())
+            lambda: self.viewmodel.update_setting(aug_flip_horizontal_use=self.check_hflip.isChecked())
         )
         self.check_vflip.clicked.connect(
-            lambda: self._vm.update_setting(aug_flip_vertical_use=self.check_vflip.isChecked())
+            lambda: self.viewmodel.update_setting(aug_flip_vertical_use=self.check_vflip.isChecked())
         )
         self.check_no_rotation.clicked.connect(
-            lambda: self._vm.update_setting(no_rotation=self.check_no_rotation.isChecked())
+            lambda: self.viewmodel.update_setting(no_rotation=self.check_no_rotation.isChecked())
         )
         self.check_include_empty.clicked.connect(
-            lambda: self._vm.update_setting(include_empty=self.check_include_empty.isChecked())
+            lambda: self.viewmodel.update_setting(include_empty=self.check_include_empty.isChecked())
         )
-        self.spin_resize.valueChanged.connect(lambda v: self._vm.update_setting(resize=v))
-        self.spin_batch_size.valueChanged.connect(lambda v: self._vm.update_setting(batch_size=v))
-        self.spin_max_epochs.valueChanged.connect(lambda v: self._vm.update_setting(max_epochs=v))
+        self.spin_resize.valueChanged.connect(lambda v: self.viewmodel.update_setting(resize=v))
+        self.spin_batch_size.valueChanged.connect(lambda v: self.viewmodel.update_setting(batch_size=v))
+        self.spin_max_epochs.valueChanged.connect(lambda v: self.viewmodel.update_setting(max_epochs=v))
         self.table_training_history.clicked.connect(self._clicked_table_training_history)
 
         # ------------------------------------------------------------------
         # ViewModel → View: state-update signals
         # ------------------------------------------------------------------
-        self._vm.training_started.connect(self._on_training_started)
-        self._vm.training_stopped.connect(self._on_training_stopped)
-        self._vm.epoch_updated.connect(self._on_epoch_updated)
-        self._vm.iter_updated.connect(self._on_iter_updated)
-        self._vm.training_time_updated.connect(self.label_time.setText)
-        self._vm.status_label_updated.connect(self._on_status_label_updated)
-        self._vm.resume_state_changed.connect(self._on_resume_state_changed)
-        self._vm.device_usage_updated.connect(self._on_device_usage_updated)
-        self._vm.app_status_changed.connect(self._on_app_status_changed)
+        self.viewmodel.training_started.connect(self._on_training_started)
+        self.viewmodel.training_stopped.connect(self._on_training_stopped)
+        self.viewmodel.epoch_updated.connect(self._on_epoch_updated)
+        self.viewmodel.iter_updated.connect(self._on_iter_updated)
+        self.viewmodel.training_time_updated.connect(self.label_time.setText)
+        self.viewmodel.status_label_updated.connect(self._on_status_label_updated)
+        self.viewmodel.resume_state_changed.connect(self._on_resume_state_changed)
+        self.viewmodel.device_usage_updated.connect(self._on_device_usage_updated)
 
-        self._vm.refresh_resume_state()
+        self.viewmodel.refresh_resume_state()
 
     # ------------------------------------------------------------------
     # UI construction helpers
@@ -202,9 +197,9 @@ class TrainerView(QWidget, Ui_trainer_widget):
         self.horizontalLayout_4.insertWidget(0, self.combo_model_profile)
         self.horizontalLayout_4.insertWidget(0, self.lbl_model_profile)
 
-        settings = self._vm.get_settings()
+        settings = self.viewmodel.get_settings()
         current_profile = settings.model_profile
-        for profile in self._vm.get_model_profiles():
+        for profile in self.viewmodel.get_model_profiles():
             self.combo_model_profile.addItem(profile.label, profile.id)
             idx = self.combo_model_profile.count() - 1
             self.combo_model_profile.setItemData(idx, profile.description, Qt.ToolTipRole)
@@ -216,7 +211,7 @@ class TrainerView(QWidget, Ui_trainer_widget):
             self.combo_model_profile.setCurrentIndex(selected_index)
             selected_profile_id = self.combo_model_profile.itemData(selected_index)
             if settings.model_profile != selected_profile_id:
-                self._vm.update_setting(model_profile=selected_profile_id)
+                self.viewmodel.update_setting(model_profile=selected_profile_id)
 
         self.combo_model_profile.setEnabled(False)
         self.combo_model_profile.setToolTip(
@@ -233,16 +228,16 @@ class TrainerView(QWidget, Ui_trainer_widget):
         if self.btn_train.isChecked():
             self._request_start_training()
         else:
-            self._vm.stop_training("The process has been terminated at the user's request.")
+            self.viewmodel.stop_training("The process has been terminated at the user's request.")
 
     def _request_start_training(self) -> None:
         resume = self.check_resume.isChecked()
 
-        ok, error = self._vm.validate_start_training(resume)
+        ok, error = self.viewmodel.validate_start_training(resume)
         if not ok:
             self.btn_train.setChecked(False)
             if error == "no_checkpoint":
-                self._vm.refresh_resume_state()
+                self.viewmodel.refresh_resume_state()
                 gui_util.get_message_box(
                     self,
                     "Resume Unavailable",
@@ -258,12 +253,12 @@ class TrainerView(QWidget, Ui_trainer_widget):
             return
 
         # Tell ViewModel preparation is beginning (emits training_started → UI update)
-        self._vm.begin_training_prep(resume)
+        self.viewmodel.begin_training_prep(resume)
 
         # Run preparation dialog (UI-only concern: modal blocking dialog)
         dlg = ProgressGeneralDialog(
             "Preparing training...",
-            self._vm.prepare_training_assets,
+            self.viewmodel.prepare_training_assets,
             steps=2,
         )
         dlg.exec_()
@@ -275,21 +270,33 @@ class TrainerView(QWidget, Ui_trainer_widget):
                 "Failed to prepare the dataset.\n"
                 "Choose images in the labeler first and make sure enough labeled data exists.",
             )
-            self._vm.abort_training_prep()
+            self.viewmodel.abort_training_prep()
             return
 
-        self._vm.launch_training(resume)
+        self.viewmodel.launch_training(resume)
 
     def _clicked_table_training_history(self) -> None:
         epoch = self.table_training_history.currentRow() + 1
-        self._refresh_validation_table(epoch, self._vm.get_valid_result_summary())
+        self._refresh_validation_table(epoch, self.viewmodel.get_valid_result_summary())
 
     # ------------------------------------------------------------------
     # ViewModel signal slots (update UI in response to state changes)
     # ------------------------------------------------------------------
 
+    def _set_training_controls_enabled(self, enabled: bool) -> None:
+        """Enable or disable all training configuration widgets at once."""
+        self.check_hflip.setEnabled(enabled)
+        self.check_vflip.setEnabled(enabled)
+        self.check_no_rotation.setEnabled(enabled)
+        self.check_include_empty.setEnabled(enabled)
+        self.spin_resize.setEnabled(enabled)
+        self.spin_batch_size.setEnabled(enabled)
+        self.spin_max_epochs.setEnabled(enabled)
+        # check_resume is controlled by resume_state_changed signal
+        # combo_model_profile stays disabled (feature not yet enabled)
+
     def _on_training_started(self, is_resume: bool, start_epoch: int) -> None:
-        settings = self._vm.get_settings()
+        settings = self.viewmodel.get_settings()
 
         self.btn_train.setChecked(True)
         self.btn_train.setText("Stop")
@@ -320,15 +327,8 @@ class TrainerView(QWidget, Ui_trainer_widget):
         self.progress_iter.setStyleSheet(gui_util.get_dark_style())
         self.lbl_train_indicator.show()
 
-        self.check_hflip.setEnabled(False)
-        self.check_vflip.setEnabled(False)
-        self.check_no_rotation.setEnabled(False)
-        self.check_include_empty.setEnabled(False)
+        self._set_training_controls_enabled(False)
         self.check_resume.setEnabled(False)
-        self.combo_model_profile.setEnabled(False)
-        self.spin_resize.setEnabled(False)
-        self.spin_batch_size.setEnabled(False)
-        self.spin_max_epochs.setEnabled(False)
 
         self.progress_device_usage.setValue(0)
         self.progress_device_usage.show()
@@ -347,14 +347,7 @@ class TrainerView(QWidget, Ui_trainer_widget):
         self.progress_iter.setStyleSheet(gui_util.get_dark_style())
         self.lbl_train_indicator.hide()
 
-        self.check_hflip.setEnabled(True)
-        self.check_vflip.setEnabled(True)
-        self.check_no_rotation.setEnabled(True)
-        self.check_include_empty.setEnabled(True)
-        self.combo_model_profile.setEnabled(False)
-        self.spin_resize.setEnabled(True)
-        self.spin_batch_size.setEnabled(True)
-        self.spin_max_epochs.setEnabled(True)
+        self._set_training_controls_enabled(True)
 
         self.progress_device_usage.hide()
         self.progress_device_usage.setValue(0)
@@ -367,16 +360,16 @@ class TrainerView(QWidget, Ui_trainer_widget):
         self.progress_iter.setValue(0)
         self.progress_iter.setStyleSheet(gui_util.get_dark_style())
         self._refresh_training_chart(
-            self._vm.get_train_summary(),
-            self._vm.get_train_result_summary(),
-            self._vm.get_valid_result_summary(),
+            self.viewmodel.get_train_summary(),
+            self.viewmodel.get_train_result_summary(),
+            self.viewmodel.get_valid_result_summary(),
         )
         self._refresh_training_history_table(
-            self._vm.get_train_summary(),
-            self._vm.get_train_result_summary(),
-            self._vm.get_valid_result_summary(),
+            self.viewmodel.get_train_summary(),
+            self.viewmodel.get_train_result_summary(),
+            self.viewmodel.get_valid_result_summary(),
         )
-        self._refresh_validation_table(epoch, self._vm.get_valid_result_summary())
+        self._refresh_validation_table(epoch, self.viewmodel.get_valid_result_summary())
 
     def _on_iter_updated(self, phase: str, idx: int, total: int) -> None:
         if phase == PHASE_TYPE_TRAINING:
@@ -416,26 +409,20 @@ class TrainerView(QWidget, Ui_trainer_widget):
         self.label_runtime_info.setText(info.get("info", ""))
         self.label_runtime_info.setToolTip(info.get("tooltip", ""))
 
-    def _on_app_status_changed(self, is_training: bool) -> None:
-        if is_training:
-            self._main_window.viewmodel.set_app_status_training()
-        else:
-            self._main_window.viewmodel.set_app_status_idle()
-
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def show(self) -> None:
         super().show()
-        self._vm.refresh_resume_state()
-        train_summary = self._vm.get_train_summary()
+        self.viewmodel.refresh_resume_state()
+        train_summary = self.viewmodel.get_train_summary()
         if not train_summary.tr_by_epoch:
             return
         try:
             last_epoch = list(train_summary.tr_by_epoch.keys())[-1]
-            train_result = self._vm.get_train_result_summary()
-            valid_result = self._vm.get_valid_result_summary()
+            train_result = self.viewmodel.get_train_result_summary()
+            valid_result = self.viewmodel.get_valid_result_summary()
             self._refresh_training_chart(train_summary, train_result, valid_result)
             self._refresh_training_history_table(train_summary, train_result, valid_result)
             self._refresh_validation_table(last_epoch, valid_result)
@@ -443,7 +430,7 @@ class TrainerView(QWidget, Ui_trainer_widget):
             pass
 
     def close(self) -> bool:
-        self._vm.close()
+        self.viewmodel.close()
         return super().close()
 
     # ------------------------------------------------------------------
@@ -451,12 +438,12 @@ class TrainerView(QWidget, Ui_trainer_widget):
     # ------------------------------------------------------------------
 
     def _refresh_existing_training_monitor(self, last_epoch: int) -> None:
-        train_summary = self._vm.get_train_summary()
+        train_summary = self.viewmodel.get_train_summary()
         if not train_summary.tr_by_epoch:
             return
         try:
-            train_result = self._vm.get_train_result_summary()
-            valid_result = self._vm.get_valid_result_summary()
+            train_result = self.viewmodel.get_train_result_summary()
+            valid_result = self.viewmodel.get_valid_result_summary()
             self._refresh_training_chart(train_summary, train_result, valid_result)
             self._refresh_training_history_table(train_summary, train_result, valid_result)
             self._refresh_validation_table(last_epoch, valid_result)
@@ -464,7 +451,7 @@ class TrainerView(QWidget, Ui_trainer_widget):
             pass
 
     def _init_training_chart(self) -> None:
-        metric_name = self._vm.metric_name
+        metric_name = self.viewmodel.metric_name
         self._canvas_graph.reset()
         self._canvas_graph_metric.reset()
         self._canvas_graph.setName("Train Loss")
@@ -477,7 +464,7 @@ class TrainerView(QWidget, Ui_trainer_widget):
     def _init_training_history(self) -> None:
         self.table_training_history.clear()
         h_names = [
-            "Train\nLoss", f"Valid\n{self._vm.metric_name}",
+            "Train\nLoss", f"Valid\n{self.viewmodel.metric_name}",
             "Corner\nError", "Corner\nX", "Corner\nY",
             "Center\nError", "Center\nX", "Center\nY",
             "Longside\nError", "Shortside\nError", "Update",
@@ -495,7 +482,7 @@ class TrainerView(QWidget, Ui_trainer_widget):
         train_result_summary: ResultSummary,
         valid_result_summary: ResultSummary,
     ) -> None:
-        metric_name = self._vm.metric_name
+        metric_name = self.viewmodel.metric_name
         tr_loss, va_metric = [], []
         for epoch in train_summary.tr_by_epoch:
             tr_loss.append(train_summary.tr_by_epoch[epoch]["loss"])
@@ -518,7 +505,7 @@ class TrainerView(QWidget, Ui_trainer_widget):
         train_result_summary: ResultSummary,
         valid_result_summary: ResultSummary,
     ) -> None:
-        metric_name = self._vm.metric_name
+        metric_name = self.viewmodel.metric_name
         self.table_training_history.clear()
 
         h_names = [
@@ -571,7 +558,7 @@ class TrainerView(QWidget, Ui_trainer_widget):
         if n_class <= 0:
             return
 
-        metric_name = self._vm.metric_name
+        metric_name = self.viewmodel.metric_name
         h_class_names = [valid_result_summary.class_name[i] for i in range(n_class)]
         self.table_validation.setColumnCount(len(h_class_names))
         self.table_validation.setHorizontalHeaderLabels(h_class_names)

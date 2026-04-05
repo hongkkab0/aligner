@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib
 import logging
 import os
-from typing import Dict, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from PyQt5 import QtCore, QtGui
 from PyQt5.QtWidgets import QApplication, QLabel, QMessageBox
@@ -65,11 +65,40 @@ class MainWindowViewModel(ViewModelBase):
     # MainWindow connects this to enable/disable toolbar actions.
     app_status_changed = QtCore.pyqtSignal(bool)
 
+    class _TabManager:
+        """Manages tab widget lifecycle: lazy creation, caching, and teardown.
+
+        Extracted from MainWindowViewModel to give it a single, clear
+        responsibility: knowing which tab widgets currently exist and how to
+        destroy them cleanly.
+        """
+
+        def __init__(self) -> None:
+            self._widgets: dict[str, object] = {}
+
+        def get(self, tab_name: str):
+            return self._widgets.get(tab_name)
+
+        def cache(self, tab_name: str, widget) -> None:
+            self._widgets[tab_name] = widget
+
+        def __contains__(self, tab_name: str) -> bool:
+            return tab_name in self._widgets
+
+        def close_all(self) -> None:
+            for widget in self._widgets.values():
+                try:
+                    widget.close()
+                except Exception:
+                    pass
+                widget.deleteLater()
+            self._widgets.clear()
+
     def __init__(self, view: 'MainWindow', project_path: str, project_open_type: str):
         super().__init__(view)
         self.view = view
         self._app_status = const.APP_STATUS_IDLE
-        self._tab_widgets: Dict[str, object] = {}
+        self._tabs = self._TabManager()
         self._loading_label = QLabel("Loading...")
         self._loading_label.setAlignment(QtCore.Qt.AlignCenter)
         self._project_path = ""
@@ -123,14 +152,8 @@ class MainWindowViewModel(ViewModelBase):
                 pass
         self._background_warmup_threads.clear()
 
-    def _clear_tab_widgets(self):
-        for widget in self._tab_widgets.values():
-            try:
-                widget.close()
-            except Exception:
-                pass
-            widget.deleteLater()
-        self._tab_widgets.clear()
+    def _clear_tab_widgets(self) -> None:
+        self._tabs.close_all()
         gui_util.hide_layout(self.view.layout_main)
 
     def _create_tab_widget(self, tab_name: str):
@@ -139,16 +162,25 @@ class MainWindowViewModel(ViewModelBase):
         if tab_name == self.TAB_LABELER:
             from aligner_gui.labeler.labeler_view import LabelerView
             return LabelerView(self.view, self.session, self._project_path, is_new=self._is_new)
-        if tab_name == self.TAB_TESTER:
-            from aligner_gui.tester.tester_view import TesterView
-            return TesterView(self.view, self.session, is_new=self._is_new)
+
         if tab_name == self.TAB_TRAINER:
             from aligner_gui.trainer.trainer_view import TrainerView
-            return TrainerView(self.view, self.session, tester_reload_callback=self._reload_tester_if_loaded)
+            view = TrainerView(self.session, tester_reload_callback=self._reload_tester_if_loaded)
+            # Wire VM signals that require MainWindowViewModel context
+            view.viewmodel.status_message_requested.connect(self.view.statusBar().showMessage)
+            view.viewmodel.app_status_changed.connect(self._on_tab_app_status_changed)
+            return view
+
+        if tab_name == self.TAB_TESTER:
+            from aligner_gui.tester.tester_view import TesterView
+            view = TesterView(self.session, is_new=self._is_new)
+            view.viewmodel.status_message_requested.connect(self.view.statusBar().showMessage)
+            return view
+
         raise NotImplementedError(tab_name)
 
     def _get_tab_widget(self, tab_name: str):
-        widget = self._tab_widgets.get(tab_name)
+        widget = self._tabs.get(tab_name)
         if widget is not None:
             return widget
 
@@ -157,7 +189,7 @@ class MainWindowViewModel(ViewModelBase):
         QApplication.processEvents()
         try:
             widget = self._create_tab_widget(tab_name)
-            self._tab_widgets[tab_name] = widget
+            self._tabs.cache(tab_name, widget)
             return widget
         finally:
             QApplication.restoreOverrideCursor()
@@ -180,10 +212,21 @@ class MainWindowViewModel(ViewModelBase):
         self.view.action_test.setChecked(tab_name == self.TAB_TESTER)
         self.view.setWindowTitle(__appname__ + " - " + self._project_path)
 
-    def _reload_tester_if_loaded(self):
-        tester_view = self._tab_widgets.get(self.TAB_TESTER)
+    def _reload_tester_if_loaded(self) -> None:
+        tester_view = self._tabs.get(self.TAB_TESTER)
         if tester_view is not None:
             tester_view.reload_file_list()
+
+    def _on_tab_app_status_changed(self, is_training: bool) -> None:
+        """Slot connected to TrainerViewModel.app_status_changed.
+
+        Routes the trainer's busy state into the app-wide status without the
+        TrainerView needing to know about MainWindowViewModel.
+        """
+        if is_training:
+            self.set_app_status_training()
+        else:
+            self.set_app_status_idle()
 
     def _get_startup_warmup_steps(self):
         return [
@@ -222,7 +265,7 @@ class MainWindowViewModel(ViewModelBase):
             return
         if self.get_app_status() != const.APP_STATUS_IDLE:
             return
-        if self.TAB_TESTER in self._tab_widgets:
+        if self.TAB_TESTER in self._tabs:
             return
         if len(self._background_warmup_threads) > 0:
             return
@@ -283,7 +326,7 @@ class MainWindowViewModel(ViewModelBase):
                 QApplication.processEvents()
                 _ = self.session.worker
             elif step in (self.TAB_TRAINER, self.TAB_TESTER):
-                if step not in self._tab_widgets:
+                if step not in self._tabs:
                     self.view.statusBar().showMessage(f"Preparing {step}...")
                     QApplication.processEvents()
                     self._get_tab_widget(step)

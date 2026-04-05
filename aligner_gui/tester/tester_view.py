@@ -27,11 +27,9 @@ TEST_LOGGER = logging.getLogger("aligner.tester")
 class TesterView(QWidget, Ui_tester_widget):
     COLOR_INFERENCE = """QProgressBar::chunk { background: yellow; }"""
 
-    def __init__(self, main_window, session, is_new: bool):
+    def __init__(self, session, is_new: bool):
         super().__init__()
         self.setupUi(self)
-        from aligner_gui.main_window import MainWindow
-        self._main_window: MainWindow = main_window
         self._is_new = is_new
 
         icon = QtGui.QIcon()
@@ -111,17 +109,16 @@ class TesterView(QWidget, Ui_tester_widget):
         self._class_name = {}
         self._last_preview_key = None
 
-        self._vm = TesterViewModel(session, parent=self)
-        self._vm.status_message_requested.connect(self._main_window.statusBar().showMessage)
-        self._vm.testing_started.connect(self._on_testing_started)
-        self._vm.testing_stopped.connect(self._on_testing_stopped)
-        self._vm.iter_progress_updated.connect(self._on_iter_progress_updated)
-        self._vm.results_updated.connect(self._on_results_updated)
-        self._vm.test_blocked.connect(
+        self.viewmodel = TesterViewModel(session, parent=self)
+        self.viewmodel.testing_started.connect(self._on_testing_started)
+        self.viewmodel.testing_stopped.connect(self._on_testing_stopped)
+        self.viewmodel.iter_progress_updated.connect(self._on_iter_progress_updated)
+        self.viewmodel.results_updated.connect(self._on_results_updated)
+        self.viewmodel.test_blocked.connect(
             lambda title, msg: gui_util.get_message_box(self, title, msg)
         )
 
-        self._preview_renderer = TesterPreviewRenderer(self._get_cv2, self._vm.get_project_settings)
+        self._preview_renderer = TesterPreviewRenderer(self._get_cv2, self.viewmodel.get_project_settings)
 
         if not self._is_new:
             self.reload_file_list()
@@ -156,13 +153,13 @@ class TesterView(QWidget, Ui_tester_widget):
             self._change_selected_image_table_file_list(img_path)
 
     def _append_files(self, paths: list) -> None:
-        self._vm.append_files(paths)
+        self.viewmodel.append_files(paths)
 
     def _clicked_btn_test(self) -> None:
-        self._vm.handle_test_button_clicked(self.btn_test.isChecked())
+        self.viewmodel.handle_test_button_clicked(self.btn_test.isChecked())
 
     def close(self) -> bool:
-        self._vm.close()
+        self.viewmodel.close()
         return super().close()
 
     # ------------------------------------------------------------------
@@ -192,7 +189,7 @@ class TesterView(QWidget, Ui_tester_widget):
         self.btn_test.setEnabled(True)
 
     def _on_results_updated(self) -> None:
-        self._worker_test_result_summary = self._vm.get_test_result_summary()
+        self._worker_test_result_summary = self.viewmodel.get_test_result_summary()
         self._clear_preview_cache()
         self._refresh_test_detail_table()
         self._refresh_test_time()
@@ -290,7 +287,7 @@ class TesterView(QWidget, Ui_tester_widget):
         del table_blocker
 
     def _refresh_test_time(self) -> None:
-        self.label_time.setText("%.3fsec/image" % self._vm.get_mean_test_time())
+        self.label_time.setText("%.3fsec/image" % self.viewmodel.get_mean_test_time())
 
     def _change_selected_image_table_file_list(self, img_path):
         preview_key = ("file", img_path)
@@ -412,7 +409,7 @@ class TesterView(QWidget, Ui_tester_widget):
         )
         if not file_paths:
             return
-        self._vm.append_files(file_paths)
+        self.viewmodel.append_files(file_paths)
         self._clear_preview_cache()
         self._refresh_table_file_list()
 
@@ -433,7 +430,7 @@ class TesterView(QWidget, Ui_tester_widget):
         dir_path = gui_util.get_open_dir_from_dialog(self, "Choose a directory to test images")
         if dir_path == "":
             return
-        self._vm.append_files(self._scan_all_images(dir_path))
+        self.viewmodel.append_files(self._scan_all_images(dir_path))
         self._clear_preview_cache()
         self._refresh_table_file_list()
 
@@ -444,7 +441,7 @@ class TesterView(QWidget, Ui_tester_widget):
             reverse=True,
         )
         if rows:
-            self._vm.remove_files_at_rows(rows)
+            self.viewmodel.remove_files_at_rows(rows)
             self._clear_preview_cache()
             self._refresh_table_file_list()
 
@@ -473,7 +470,7 @@ class TesterView(QWidget, Ui_tester_widget):
 
     def reload_file_list(self) -> None:
         try:
-            dataset_summary_path = self._vm.get_dataset_summary_path()
+            dataset_summary_path = self.viewmodel.get_dataset_summary_path()
             with open(dataset_summary_path, "r", encoding="utf-8") as f:
                 self._dataset_summary = json.load(f)
         except Exception as e:
@@ -483,12 +480,12 @@ class TesterView(QWidget, Ui_tester_widget):
         self._classes = [c["name"] for c in self._dataset_summary["class_summary"]["classes"]]
         self._class_index = {v: idx for idx, v in enumerate(self._classes)}
         self._class_name = {idx: v for idx, v in enumerate(self._classes)}
-        self._vm.reset_file_list([data["img_path"] for data in self._dataset_summary["data_summary"]])
+        self.viewmodel.reset_file_list([data["img_path"] for data in self._dataset_summary["data_summary"]])
         self._clear_preview_cache()
         self._refresh_table_file_list()
 
     def _refresh_table_file_list(self) -> None:
-        file_list = self._vm.get_file_list()
+        file_list = self.viewmodel.get_file_list()
         selected_paths = {
             self.table_file_list.item(index.row(), 0).text()
             for index in self.table_file_list.selectedIndexes()

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 import traceback
-from typing import Callable, Optional
+from typing import Callable, Optional, TypedDict
 
 from PyQt5.QtCore import QTimer, pyqtSignal
 
@@ -16,6 +16,24 @@ from aligner_engine.const import PHASE_TYPE_TRAINING, PHASE_TYPE_VALIDATION
 from aligner_engine.project_settings import ProjectSettings
 
 TRAIN_LOGGER = logging.getLogger("aligner.trainer")
+
+
+class DeviceUsageInfo(TypedDict):
+    """Payload emitted by :attr:`TrainerViewModel.device_usage_updated`.
+
+    visible  : Whether a GPU is available; False means CPU-only mode.
+    title    : Label for the device panel header (e.g. "GPU Mem" or "CPU").
+    percent  : Human-readable percentage string (e.g. "72%"), empty when invisible.
+    value    : Integer 0-100 for the progress bar; 0 when invisible.
+    info     : Detailed memory string shown in the panel body.
+    tooltip  : Device name for the tooltip, empty when invisible.
+    """
+    visible: bool
+    title: str
+    percent: str
+    value: int
+    info: str
+    tooltip: str
 
 
 class TrainerViewModel(ViewModelBase):
@@ -48,7 +66,7 @@ class TrainerViewModel(ViewModelBase):
     resume_state_changed = pyqtSignal(bool, int)  # (can_resume, last_epoch)
 
     # GPU / device panel
-    device_usage_updated = pyqtSignal(dict)      # see _emit_gpu_* for key reference
+    device_usage_updated = pyqtSignal(dict)      # payload schema: DeviceUsageInfo
 
     # Global app status (consumed by MainWindowViewModel)
     app_status_changed = pyqtSignal(bool)        # True = training, False = idle
