@@ -19,6 +19,7 @@ from aligner_gui.project.project_export_service import export_project_bundle, li
 from aligner_gui.dialogs.project_open_dialog import ProjectOpenDialog
 from aligner_gui.project.project_session import ProjectSession
 from aligner_gui.ui.main_window import Ui_main_window
+from aligner_gui.viewmodels.app_viewmodel import AppViewModel
 
 
 class StartupWarmupThread(QtCore.QThread):
@@ -78,9 +79,12 @@ class MainWindow(QMainWindow, Ui_main_window):
         self._prewarm_active = False
         self._background_warmup_threads = []
 
+        self.app_vm = AppViewModel(self)
+        self.app_vm.status_changed.connect(self._on_app_status_changed)
+
         self._init_ui()
         self._replace_project(project_path, project_open_type)
-        self.set_app_status_idle()
+        self._on_app_status_changed(const.APP_STATUS_IDLE)
 
     def _init_ui(self):
         self.trainer_log_widget = LogWidget(prefixes=("aligner.trainer",))
@@ -147,13 +151,13 @@ class MainWindow(QMainWindow, Ui_main_window):
         if tab_name == self.TAB_TESTER:
             from aligner_gui.tester.tester_widget import TesterWidget
 
-            return TesterWidget(self, self.session, is_new=self._is_new)
+            return TesterWidget(self.session, is_new=self._is_new)
         if tab_name == self.TAB_TRAINER:
             from aligner_gui.trainer.trainer_widget import TrainerWidget
 
             return TrainerWidget(
-                self,
                 self.session,
+                self.app_vm,
                 tester_reload_callback=self._reload_tester_if_loaded,
             )
         raise NotImplementedError(tab_name)
@@ -236,7 +240,7 @@ class MainWindow(QMainWindow, Ui_main_window):
     def _start_background_tester_warmup(self):
         if const.STARTUP_PREWARM_MODE != "startup":
             return
-        if self.get_app_status() != const.APP_STATUS_IDLE:
+        if not self.app_vm.is_idle:
             return
         if self.TAB_TESTER in self._tab_widgets:
             return
@@ -275,7 +279,7 @@ class MainWindow(QMainWindow, Ui_main_window):
     def _start_staged_prewarm(self):
         if const.STARTUP_PREWARM_MODE != "staged":
             return
-        if self.session is None or self.get_app_status() != const.APP_STATUS_IDLE:
+        if self.session is None or not self.app_vm.is_idle:
             return
         self._prewarm_queue = ["session", self.TAB_TRAINER, self.TAB_TESTER]
         self._prewarm_active = True
@@ -284,7 +288,7 @@ class MainWindow(QMainWindow, Ui_main_window):
     def _run_next_prewarm_step(self):
         if not self._prewarm_active:
             return
-        if self.session is None or self.get_app_status() != const.APP_STATUS_IDLE:
+        if self.session is None or not self.app_vm.is_idle:
             self._prewarm_active = False
             return
         if len(self._prewarm_queue) == 0:
@@ -389,7 +393,7 @@ class MainWindow(QMainWindow, Ui_main_window):
             gui_util.get_message_box(self, "Export", "Export failed. Please check the log message.")
 
     def triggered_action_new_project(self):
-        if self.get_app_status() != const.APP_STATUS_IDLE:
+        if not self.app_vm.is_idle:
             gui_util.get_message_box(self, "Busy", "Stop the current task before switching projects.")
             return
 
@@ -413,7 +417,7 @@ class MainWindow(QMainWindow, Ui_main_window):
         self.initialize_project_runtime()
 
     def triggered_action_load_project(self):
-        if self.get_app_status() != const.APP_STATUS_IDLE:
+        if not self.app_vm.is_idle:
             gui_util.get_message_box(self, "Busy", "Stop the current task before switching projects.")
             return
 
@@ -426,19 +430,13 @@ class MainWindow(QMainWindow, Ui_main_window):
         self.initialize_project_runtime()
 
     def get_app_status(self) -> str:
-        return self._app_status
+        return self.app_vm.app_status
 
-    def set_app_status_idle(self):
-        self._app_status = const.APP_STATUS_IDLE
-        self.action_export.setEnabled(True)
-        self.action_new_project.setEnabled(True)
-        self.action_load_project.setEnabled(True)
-
-    def set_app_status_training(self):
-        self._app_status = const.APP_STATUS_TRAINING
-        self.action_export.setEnabled(False)
-        self.action_new_project.setEnabled(False)
-        self.action_load_project.setEnabled(False)
+    def _on_app_status_changed(self, status: str) -> None:
+        is_idle = status == const.APP_STATUS_IDLE
+        self.action_export.setEnabled(is_idle)
+        self.action_new_project.setEnabled(is_idle)
+        self.action_load_project.setEnabled(is_idle)
 
     def closeEvent(self, event):
         yes_or_no = gui_util.get_yes_no_box(self, "Closing Question", "Are you sure you want to quit?")

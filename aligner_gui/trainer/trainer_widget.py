@@ -1,30 +1,49 @@
 from __future__ import annotations
 
-from PyQt5 import QtGui
-from PyQt5.QtWidgets import *
-from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QTimer
-from aligner_gui.ui.trainer_widget import Ui_trainer_widget
-import logging
 import time
-from aligner_gui.trainer.thread_train import ThreadTrain
-from aligner_gui.trainer.training_timer import TrainingTimer, timestamp2time
 import traceback
-from aligner_gui.utils import const
-from aligner_gui.utils import gui_util
+from typing import Callable, Optional
+
+from PyQt5 import QtGui
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QFrame,
+    QLabel,
+    QProgressBar,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+import logging
+import numpy
+
+from aligner_gui.ui.trainer_widget import Ui_trainer_widget
+from aligner_gui.trainer.training_timer import TrainingTimer, timestamp2time
+from aligner_gui.trainer.gpu_monitor import GpuUsageSnapshot, NvidiaSmiPoller
+from aligner_gui.utils import const, gui_util
 from aligner_gui.widgets.graph_widget import GraphWidget
 from aligner_gui.widgets.progress_general_dialog import ProgressGeneralDialog
-from aligner_gui.project.project_dataset_service import build_dataset_summary_from_project
-from aligner_gui.trainer.gpu_monitor import GpuUsageSnapshot, NvidiaSmiPoller
-from aligner_engine.project_settings import ProjectSettings
+from aligner_gui.viewmodels.trainer_viewmodel import TrainerViewModel
 from aligner_engine.summary import TrainSummary, ResultSummary
 from aligner_engine.const import PHASE_TYPE_TRAINING, PHASE_TYPE_VALIDATION
-import numpy
-from typing import Callable
 
 TRAIN_LOGGER = logging.getLogger("aligner.trainer")
 
 
 class TrainerWidget(QWidget, Ui_trainer_widget):
+    """View layer for the Trainer tab.
+
+    All business logic lives in :class:`~aligner_gui.viewmodels.trainer_viewmodel.TrainerViewModel`.
+    This class is responsible only for:
+
+    * Building and wiring up the Qt UI elements.
+    * Connecting ViewModel signals to local UI-update slots.
+    * Delegating user actions to the ViewModel via command methods.
+    * Showing modal dialogs that cannot live in the ViewModel (ProgressGeneralDialog).
+    """
+
     COLOR_TRAINING = """QProgressBar::chunk { background: red; }"""
     COLOR_VALIDATION = """QProgressBar::chunk { background: green; }"""
     DEVICE_BAR_STYLE = """
@@ -41,13 +60,17 @@ class TrainerWidget(QWidget, Ui_trainer_widget):
     }
     """
 
-    def __init__(self, main_window, session, tester_reload_callback: Callable[[], None] | None = None):
-        super().__init__()
+    def __init__(
+        self,
+        session,
+        app_viewmodel,
+        tester_reload_callback: Optional[Callable[[], None]] = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
         self.setupUi(self)
-        from aligner_gui.main_window import MainWindow
-        self._main_window: MainWindow = main_window
-        self._worker = session
-        self._tester_reload_callback = tester_reload_callback
+
+        self._vm = TrainerViewModel(session, app_viewmodel, tester_reload_callback, parent=self)
 
         self._canvas_graph = GraphWidget(hide_legend=True)
         self._canvas_graph_metric = GraphWidget(hide_legend=True, limit_range=(0, 1))
@@ -61,58 +84,22 @@ class TrainerWidget(QWidget, Ui_trainer_widget):
         self.check_resume.setToolTip("Continue training from the latest saved checkpoint.")
         self.horizontalLayout_4.addWidget(self.check_resume)
 
-        self.device_panel = QFrame()
-        self.device_panel.setMinimumWidth(120)
-        self.device_panel.setMaximumWidth(160)
-        self.device_panel.setFrameShape(QFrame.StyledPanel)
-        self.device_panel.setFrameShadow(QFrame.Raised)
-        self.device_panel_layout = QVBoxLayout(self.device_panel)
-        self.device_panel_layout.setContentsMargins(8, 8, 8, 8)
-        self.device_panel_layout.setSpacing(6)
-        self.device_panel_layout.setAlignment(Qt.AlignTop)
-
-        self.label_device_title = QLabel("GPU Mem")
-        self.label_device_title.setAlignment(Qt.AlignCenter)
-        self.device_panel_layout.addWidget(self.label_device_title)
-
-        self.progress_device_usage = QProgressBar()
-        self.progress_device_usage.setOrientation(Qt.Vertical)
-        self.progress_device_usage.setFixedSize(20, 118)
-        self.progress_device_usage.setRange(0, 100)
-        self.progress_device_usage.setTextVisible(False)
-        self.progress_device_usage.setInvertedAppearance(False)
-        self.progress_device_usage.setStyleSheet(self.DEVICE_BAR_STYLE)
-        self.progress_device_usage.hide()
-        self.device_panel_layout.addWidget(self.progress_device_usage, alignment=Qt.AlignHCenter)
-
-        self.label_device_percent = QLabel("")
-        self.label_device_percent.setAlignment(Qt.AlignCenter)
-        self.label_device_percent.setStyleSheet("font-weight: 600; color: rgb(220, 226, 232);")
-        self.device_panel_layout.addWidget(self.label_device_percent)
-
-        self.label_runtime_info = QLabel("VRAM --/--")
-        self.label_runtime_info.setAlignment(Qt.AlignCenter)
-        self.label_runtime_info.setStyleSheet("color: rgb(170, 180, 190);")
-        self.label_runtime_info.setWordWrap(False)
-        self.device_panel_layout.addWidget(self.label_runtime_info)
-        self.device_panel_layout.addStretch(1)
-
-        self.layout_visualization.addWidget(self.device_panel)
+        self._build_device_panel()
         self._init_model_profile_ui()
 
-        # bind handler
+        # -- Bind UI input handlers
         self.btn_train.clicked.connect(self._clicked_btn_train)
-        self.check_hflip.clicked.connect(self._clicked_check_hflip)
-        self.check_vflip.clicked.connect(self._clicked_check_vflip)
-        self.check_no_rotation.clicked.connect(self._clicked_check_no_rotation)
-        self.check_include_empty.clicked.connect(self._clicked_check_include_empty)
-        self.spin_resize.valueChanged.connect(self._changed_spin_resize)
-        self.spin_batch_size.valueChanged.connect(self._changed_spin_batch_size)
-        self.spin_max_epochs.valueChanged.connect(self._changed_max_epochs)
+        self.check_hflip.clicked.connect(lambda: self._vm.update_setting(aug_flip_horizontal_use=self.check_hflip.isChecked()))
+        self.check_vflip.clicked.connect(lambda: self._vm.update_setting(aug_flip_vertical_use=self.check_vflip.isChecked()))
+        self.check_no_rotation.clicked.connect(lambda: self._vm.update_setting(no_rotation=self.check_no_rotation.isChecked()))
+        self.check_include_empty.clicked.connect(lambda: self._vm.update_setting(include_empty=self.check_include_empty.isChecked()))
+        self.spin_resize.valueChanged.connect(lambda v: self._vm.update_setting(resize=v))
+        self.spin_batch_size.valueChanged.connect(lambda v: self._vm.update_setting(batch_size=v))
+        self.spin_max_epochs.valueChanged.connect(lambda v: self._vm.update_setting(max_epochs=v))
         self.table_training_history.clicked.connect(self._clicked_table_training_history)
 
-        # Ui init
-        settings = self._get_settings()
+        # -- Sync initial UI values from settings
+        settings = self._vm.get_settings()
         self.check_hflip.setChecked(settings.aug_flip_horizontal_use)
         self.check_vflip.setChecked(settings.aug_flip_vertical_use)
         self.check_no_rotation.setChecked(settings.no_rotation)
@@ -121,19 +108,21 @@ class TrainerWidget(QWidget, Ui_trainer_widget):
         self.spin_batch_size.setValue(settings.batch_size)
         self.spin_max_epochs.setValue(settings.max_epochs)
 
-        # thread setting
-        self._th_train = ThreadTrain(self._worker)
-        self._th_train.qt_signal_stop_training.connect(self._stop_training)
-        self._th_train.qt_signal_update_epoch.connect(self._update_epoch_th_train)
-        self._th_train.qt_signal_update_iter.connect(self._update_iter_th_train)
-        self._th_train.qt_signal_status.connect(self._update_training_status)
+        # -- Connect ViewModel signals → View slots
+        self._vm.training_prep_started.connect(self._on_training_prep_started)
+        self._vm.training_stopped.connect(self._on_training_stopped)
+        self._vm.epoch_updated.connect(self._on_epoch_updated)
+        self._vm.iter_updated.connect(self._on_iter_updated)
+        self._vm.status_message_changed.connect(self._on_status_message_changed)
+        self._vm.resume_state_changed.connect(self._on_resume_state_changed)
 
-        # for training
+        # -- Busy indicator
         self._busy_indicator = QtGui.QMovie("aligner_gui\\icons\\essential\\ajax-loader_indicator_big_white.gif")
         self.lbl_train_indicator.setMovie(self._busy_indicator)
         self._busy_indicator.start()
         self.lbl_train_indicator.hide()
 
+        # -- Training support objects
         self._training_timer = TrainingTimer()
         self._device_poll_timer = QTimer(self)
         self._device_poll_timer.setInterval(1500)
@@ -144,9 +133,53 @@ class TrainerWidget(QWidget, Ui_trainer_widget):
         self._gpu_monitor_available: bool | None = None
         self._current_epoch_for_eta = 1
         self._last_iter_ui_update_ts = 0.0
-        self._refresh_resume_ui()
 
-    def _init_model_profile_ui(self):
+        self._vm.refresh_resume_state()
+
+    # ------------------------------------------------------------------
+    # UI construction helpers
+    # ------------------------------------------------------------------
+
+    def _build_device_panel(self) -> None:
+        self.device_panel = QFrame()
+        self.device_panel.setMinimumWidth(120)
+        self.device_panel.setMaximumWidth(160)
+        self.device_panel.setFrameShape(QFrame.StyledPanel)
+        self.device_panel.setFrameShadow(QFrame.Raised)
+        layout = QVBoxLayout(self.device_panel)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+        layout.setAlignment(Qt.AlignTop)
+
+        self.label_device_title = QLabel("GPU Mem")
+        self.label_device_title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.label_device_title)
+
+        self.progress_device_usage = QProgressBar()
+        self.progress_device_usage.setOrientation(Qt.Vertical)
+        self.progress_device_usage.setFixedSize(20, 118)
+        self.progress_device_usage.setRange(0, 100)
+        self.progress_device_usage.setTextVisible(False)
+        self.progress_device_usage.setInvertedAppearance(False)
+        self.progress_device_usage.setStyleSheet(self.DEVICE_BAR_STYLE)
+        self.progress_device_usage.hide()
+        layout.addWidget(self.progress_device_usage, alignment=Qt.AlignHCenter)
+
+        self.label_device_percent = QLabel("")
+        self.label_device_percent.setAlignment(Qt.AlignCenter)
+        self.label_device_percent.setStyleSheet("font-weight: 600; color: rgb(220, 226, 232);")
+        layout.addWidget(self.label_device_percent)
+
+        self.label_runtime_info = QLabel("VRAM --/--")
+        self.label_runtime_info.setAlignment(Qt.AlignCenter)
+        self.label_runtime_info.setStyleSheet("color: rgb(170, 180, 190);")
+        self.label_runtime_info.setWordWrap(False)
+        layout.addWidget(self.label_runtime_info)
+        layout.addStretch(1)
+
+        self.layout_visualization.addWidget(self.device_panel)
+
+    def _init_model_profile_ui(self) -> None:
         self.lbl_model_profile = QLabel("Model")
         self.lbl_model_profile.setMinimumSize(100, 0)
         self.combo_model_profile = QComboBox()
@@ -158,9 +191,9 @@ class TrainerWidget(QWidget, Ui_trainer_widget):
         self.horizontalLayout_4.insertWidget(0, self.combo_model_profile)
         self.horizontalLayout_4.insertWidget(0, self.lbl_model_profile)
 
-        settings = self._get_settings()
+        settings = self._vm.get_settings()
         current_profile = settings.model_profile
-        for profile in self._worker.get_model_profiles():
+        for profile in self._vm.get_model_profiles():
             self.combo_model_profile.addItem(profile.label, profile.id)
             idx = self.combo_model_profile.count() - 1
             self.combo_model_profile.setItemData(idx, profile.description, Qt.ToolTipRole)
@@ -172,201 +205,105 @@ class TrainerWidget(QWidget, Ui_trainer_widget):
             self.combo_model_profile.setCurrentIndex(selected_index)
             selected_profile_id = self.combo_model_profile.itemData(selected_index)
             if settings.model_profile != selected_profile_id:
-                settings.model_profile = selected_profile_id
-                self._save_settings(settings)
+                self._vm.update_setting(model_profile=selected_profile_id)
+
         self.combo_model_profile.setEnabled(False)
-        self.combo_model_profile.setToolTip("Model profile switching is temporarily disabled until the corresponding pretrained weights are bundled.")
+        self.combo_model_profile.setToolTip(
+            "Model profile switching is temporarily disabled until the corresponding pretrained weights are bundled."
+        )
         self.lbl_model_profile.hide()
         self.combo_model_profile.hide()
 
-    def _get_settings(self) -> ProjectSettings:
-        return self._worker.get_project_settings()
+    # ------------------------------------------------------------------
+    # Button handlers (View → ViewModel commands)
+    # ------------------------------------------------------------------
 
-    def _save_settings(self, settings: ProjectSettings):
-        self._worker.set_project_settings(settings)
+    def _clicked_btn_train(self) -> None:
+        if self.btn_train.isChecked():
+            self._request_start_training()
+        else:
+            self._vm.stop_training("The process has been terminated at the user's request.")
 
-    def _clicked_check_hflip(self):
-        settings = self._get_settings()
-        settings.aug_flip_horizontal_use = self.check_hflip.isChecked()
-        self._save_settings(settings)
+    def _request_start_training(self) -> None:
+        resume = self.check_resume.isChecked()
 
-    def _clicked_check_vflip(self):
-        settings = self._get_settings()
-        settings.aug_flip_vertical_use = self.check_vflip.isChecked()
-        self._save_settings(settings)
-
-    def _clicked_check_no_rotation(self):
-        settings = self._get_settings()
-        settings.no_rotation = self.check_no_rotation.isChecked()
-        self._save_settings(settings)
-
-    def _clicked_check_include_empty(self):
-        settings = self._get_settings()
-        settings.include_empty = self.check_include_empty.isChecked()
-        self._save_settings(settings)
-
-    def _changed_spin_resize(self):
-        settings = self._get_settings()
-        settings.resize = self.spin_resize.value()
-        self._save_settings(settings)
-
-    def _changed_max_epochs(self):
-        settings = self._get_settings()
-        settings.max_epochs = self.spin_max_epochs.value()
-        self._save_settings(settings)
-
-    def _changed_spin_batch_size(self):
-        settings = self._get_settings()
-        settings.batch_size = self.spin_batch_size.value()
-        self._save_settings(settings)
-
-    def _changed_model_profile(self):
-        if not self.combo_model_profile.isEnabled():
+        ok, error = self._vm.validate_start_training(resume)
+        if not ok:
+            self.btn_train.setChecked(False)
+            if error == "no_checkpoint":
+                self._vm.refresh_resume_state()
+                gui_util.get_message_box(
+                    self,
+                    "Resume Unavailable",
+                    "No last checkpoint was found.\nRun at least one epoch first or start a fresh training.",
+                )
+            elif error == "max_epochs_reached":
+                gui_util.get_message_box(
+                    self,
+                    "Resume Unavailable",
+                    "The latest checkpoint already reached the configured max epochs.\nIncrease Epochs to continue training.",
+                )
             return
-        profile_id = self.combo_model_profile.currentData()
-        if not profile_id:
-            return
-        settings = self._get_settings()
-        if settings.model_profile == profile_id:
-            return
-        settings.model_profile = profile_id
-        self._save_settings(settings)
 
-    def _get_torch(self):
-        import torch
+        # Signal ViewModel to begin prep → triggers _on_training_prep_started
+        self._vm.begin_training_prep(resume)
 
-        return torch
-
-    def _prepare_training_assets(self) -> bool:
-        settings = self._get_settings()
-
+        # Show prep dialog (View concern: modal dialog)
         def work(processing_signal):
-            processing_signal.emit(1, "Building dataset summary...")
-            build_dataset_summary_from_project(
-                self._worker.project_path,
-                self._worker.get_dataset_summary_path(),
-                settings.include_empty,
-            )
-            processing_signal.emit(2, "Preparing training workspace...")
-            return True
+            return self._vm.prepare_training_assets(processing_signal)
 
         dlg = ProgressGeneralDialog("Preparing training...", work, 2)
         dlg.exec_()
+
         if not dlg.is_success:
             gui_util.get_message_box(
                 self,
                 "Invalid Dataset",
                 "Failed to prepare the dataset.\nChoose images in the labeler first and make sure enough labeled data exists.",
             )
-            return False
-
-        if self._tester_reload_callback is not None:
-            self._tester_reload_callback()
-        return True
-
-    def _refresh_resume_ui(self):
-        can_resume = self._worker.can_resume_training()
-        last_epoch = self._worker.get_last_completed_epoch()
-        self.check_resume.setEnabled(can_resume)
-        if not can_resume:
-            self.check_resume.setChecked(False)
-            self.check_resume.setToolTip("Enable after at least one checkpoint has been saved.")
+            self._vm.abort_training_prep()
             return
-        resume_epoch = last_epoch + 1 if last_epoch > 0 else 1
-        self.check_resume.setToolTip(
-            f"Continue training from auto_saved\\last.pth.\nNext epoch: {resume_epoch}"
-        )
-
-    def _refresh_existing_training_monitor(self, last_epoch: int):
-        self._refresh_training_chart(
-            self._worker.get_train_summary(),
-            self._worker.get_train_result_summary(),
-            self._worker.get_valid_result_summary(),
-        )
-        self._refresh_training_history_table(
-            self._worker.get_train_summary(),
-            self._worker.get_train_result_summary(),
-            self._worker.get_valid_result_summary(),
-        )
-        self._refresh_validation_table(last_epoch, self._worker.get_valid_result_summary())
-
-    def _start_training(self):
-        try:
-            TRAIN_LOGGER.info('start training')
-            resume_training = self.check_resume.isChecked()
-            if resume_training and not self._worker.can_resume_training():
-                self._refresh_resume_ui()
-                gui_util.get_message_box(
-                    self,
-                    "Resume Unavailable",
-                    "No last checkpoint was found.\nRun at least one epoch first or start a fresh training.",
-                )
-                return
-            if resume_training and self._worker.get_last_completed_epoch() >= self._get_settings().max_epochs:
-                gui_util.get_message_box(
-                    self,
-                    "Resume Unavailable",
-                    "The latest checkpoint already reached the configured max epochs.\nIncrease Epochs to continue training.",
-                )
-                return
-            self._on_start_training(resume_training)
-            if not self._prepare_training_assets():
-                self._stop_training(const.ERROR)
-                return
-            TRAIN_LOGGER.info("Dataset is built successfully")
-            torch = self._get_torch()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            self._th_train.set_resume_training(resume_training)
-            self._th_train.start()
-
-        except Exception as e:
-            traceback.print_tb(e.__traceback__)
-            error_msg = "ERROR - " + str(e)
-            TRAIN_LOGGER.error(error_msg)
-            self._stop_training(const.ERROR)
-
-    def _stop_training(self, reason: str):
-        if self._th_train.isRunning():
-            self._th_train.terminate()
 
         torch = self._get_torch()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        if reason == const.SUCCESS:
-            TRAIN_LOGGER.info("training finished successfully")
-        elif reason == const.ERROR:
-            TRAIN_LOGGER.error("training failed")
-        else:
-            TRAIN_LOGGER.info(reason)
-        self._on_stop_training()
+        self._vm.launch_training(resume)
 
-    def _on_start_training(self, resume_training: bool):
-        settings = self._get_settings()
-        last_epoch = self._worker.get_last_completed_epoch() if resume_training else 0
+    def _clicked_table_training_history(self) -> None:
+        epoch = self.table_training_history.currentRow() + 1
+        self._refresh_validation_table(epoch, self._vm.get_valid_result_summary())
+
+    # ------------------------------------------------------------------
+    # ViewModel signal slots (update UI in response to state changes)
+    # ------------------------------------------------------------------
+
+    def _on_training_prep_started(self, is_resume: bool, start_epoch: int) -> None:
+        """Called when the ViewModel confirms training preparation has begun."""
+        settings = self._vm.get_settings()
 
         self.btn_train.setChecked(True)
         self.btn_train.setText("Stop")
         self.btn_train.setEnabled(True)
 
-        if resume_training and last_epoch > 0:
-            self.label_time.setText(f"Resuming from epoch {last_epoch + 1}...")
+        if is_resume and start_epoch > 0:
+            self.label_time.setText(f"Resuming from epoch {start_epoch + 1}...")
         else:
             self.label_time.setText("Preparing training...")
+
         self.label_device_title.setText("GPU Mem")
         self.label_device_percent.setText("")
         self.label_runtime_info.setText("VRAM --/--")
-        if resume_training and last_epoch > 0:
-            self._refresh_existing_training_monitor(last_epoch)
+
+        if is_resume and start_epoch > 0:
+            self._refresh_existing_training_monitor(start_epoch)
         else:
             self._init_training_chart()
             self._init_training_history()
             self._init_validation_table()
 
-
         self.progress_epoch.setMaximum(settings.max_epochs)
-        self.progress_epoch.setValue(last_epoch)
+        self.progress_epoch.setValue(start_epoch)
         self.progress_epoch.setStyleSheet(gui_util.get_dark_style())
 
         self.progress_iter.setMaximum(1)
@@ -380,25 +317,36 @@ class TrainerWidget(QWidget, Ui_trainer_widget):
         self.check_include_empty.setEnabled(False)
         self.check_resume.setEnabled(False)
         self.combo_model_profile.setEnabled(False)
-
         self.spin_resize.setEnabled(False)
         self.spin_batch_size.setEnabled(False)
         self.spin_max_epochs.setEnabled(False)
 
-        self._training_timer.train_start(last_epoch, settings.max_epochs)
-        self._current_epoch_for_eta = max(last_epoch + 1, 1)
+        self._training_timer.train_start(start_epoch, settings.max_epochs)
+        self._current_epoch_for_eta = max(start_epoch + 1, 1)
         self._last_iter_ui_update_ts = 0.0
         self._gpu_monitor_available = None
         self.progress_device_usage.setValue(0)
         self.progress_device_usage.show()
+
         torch = self._get_torch()
         if torch.cuda.is_available():
             self._gpu_monitor.set_preferred_device_index(torch.cuda.current_device())
         self._device_poll_timer.start()
         self._refresh_device_usage()
-        self._main_window.set_app_status_training()
 
-    def _on_stop_training(self):
+    def _on_training_stopped(self, reason: str) -> None:
+        """Called when the ViewModel reports training has ended."""
+        torch = self._get_torch()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        if reason == const.SUCCESS:
+            TRAIN_LOGGER.info("training finished successfully")
+        elif reason == const.ERROR:
+            TRAIN_LOGGER.error("training failed")
+        else:
+            TRAIN_LOGGER.info(reason)
+
         self.btn_train.setChecked(False)
         self.btn_train.setText("Train")
         self.btn_train.setEnabled(True)
@@ -417,11 +365,10 @@ class TrainerWidget(QWidget, Ui_trainer_widget):
         self.check_no_rotation.setEnabled(True)
         self.check_include_empty.setEnabled(True)
         self.combo_model_profile.setEnabled(False)
-
         self.spin_resize.setEnabled(True)
         self.spin_batch_size.setEnabled(True)
         self.spin_max_epochs.setEnabled(True)
-        self._refresh_resume_ui()
+
         self._device_poll_timer.stop()
         self._gpu_monitor.stop()
         self._gpu_monitor_available = None
@@ -430,43 +377,115 @@ class TrainerWidget(QWidget, Ui_trainer_widget):
         self.label_device_percent.setText("")
         self.label_device_title.setText("GPU Mem")
         self.label_runtime_info.setText("VRAM --/--")
-        self._main_window.set_app_status_idle()
 
-    def _update_training_status(self, message: str):
+        self._vm.refresh_resume_state()
+
+    def _on_epoch_updated(self, current_epoch: int, current_ckpt_path: str) -> None:
+        self.progress_epoch.setValue(current_epoch)
+        self._current_epoch_for_eta = current_epoch + 1
+        self.progress_iter.setValue(0)
+        self.progress_iter.setStyleSheet(gui_util.get_dark_style())
+
+        self._vm.save_records_after_epoch(current_epoch, current_ckpt_path)
+        self._refresh_training_time(current_epoch)
+        self._refresh_training_chart(
+            self._vm.get_train_summary(),
+            self._vm.get_train_result_summary(),
+            self._vm.get_valid_result_summary(),
+        )
+        self._refresh_training_history_table(
+            self._vm.get_train_summary(),
+            self._vm.get_train_result_summary(),
+            self._vm.get_valid_result_summary(),
+        )
+        self._refresh_validation_table(current_epoch, self._vm.get_valid_result_summary())
+
+    def _on_iter_updated(self, phase_type: str, iter_idx: int, iter_len: int) -> None:
+        if phase_type == PHASE_TYPE_TRAINING:
+            self.progress_iter.setStyleSheet(self.COLOR_TRAINING)
+        elif phase_type == PHASE_TYPE_VALIDATION:
+            self.progress_iter.setStyleSheet(self.COLOR_VALIDATION)
+        else:
+            raise NotImplementedError(phase_type)
+
+        self.progress_iter.setMaximum(iter_len)
+        self.progress_iter.setValue(iter_idx + 1)
+
+        now = time.monotonic()
+        is_last_iter = iter_len > 0 and (iter_idx + 1) >= iter_len
+        if is_last_iter or (now - self._last_iter_ui_update_ts) >= 0.15:
+            self._last_iter_ui_update_ts = now
+            self._refresh_training_time_live(phase_type, iter_idx, iter_len)
+
+    def _on_status_message_changed(self, message: str) -> None:
         if self.progress_epoch.value() == 0 and self.progress_iter.value() == 0:
             self.label_time.setText(message)
 
-    def _clicked_btn_train(self):
-        if self.btn_train.isChecked():
-            self._start_training()
-        else:
-            self._stop_training("The process has been terminated at the user's request.")
-
-    def close(self):
-        self._stop_training("window close")
-        return super().close()
-
-    def _refresh_training_time(self, cur_epoch):
-        one_epoch, avg_one_epoch, processed, remaining = self._training_timer.one_epoch_done(cur_epoch)
-        estTimeMsg = 'Avg epoch %.1fs   Elapsed %s   Remaining %s' \
-                     % (avg_one_epoch, timestamp2time(processed), timestamp2time(remaining))
-        self.label_time.setText(estTimeMsg)
-
-    def _refresh_training_time_live(self, phase_type: str, iter_idx: int, iter_len: int):
-        current_epoch = min(max(self.progress_epoch.value() + 1, 1), max(self.progress_epoch.maximum(), 1))
-        self._current_epoch_for_eta = current_epoch
-        avg_step, processed, remaining = self._training_timer.one_iter_progress(
-            phase_type,
-            iter_idx,
-            iter_len,
-            current_epoch,
-        )
-        phase_name = "Train" if phase_type == PHASE_TYPE_TRAINING else "Valid"
-        self.label_time.setText(
-            f'{phase_name} {iter_idx + 1}/{iter_len}   Avg step {avg_step:.2f}s   Elapsed {timestamp2time(processed)}   Remaining {timestamp2time(remaining)}'
+    def _on_resume_state_changed(self, can_resume: bool, last_epoch: int) -> None:
+        self.check_resume.setEnabled(can_resume)
+        if not can_resume:
+            self.check_resume.setChecked(False)
+            self.check_resume.setToolTip("Enable after at least one checkpoint has been saved.")
+            return
+        resume_epoch = last_epoch + 1 if last_epoch > 0 else 1
+        self.check_resume.setToolTip(
+            f"Continue training from auto_saved\\last.pth.\nNext epoch: {resume_epoch}"
         )
 
-    def _sample_gpu_memory_stats(self):
+    # ------------------------------------------------------------------
+    # GPU / device monitoring (View-only concern)
+    # ------------------------------------------------------------------
+
+    def _get_torch(self):
+        import torch
+        return torch
+
+    def _refresh_device_usage(self) -> None:
+        torch = self._get_torch()
+        if not torch.cuda.is_available():
+            self.progress_device_usage.hide()
+            self.label_device_title.setText("CPU")
+            self.label_device_percent.setText("")
+            self.label_runtime_info.setText("Device: CPU training")
+            return
+
+        if self._gpu_monitor_available is not True:
+            self._apply_gpu_memory_fallback()
+        self._gpu_monitor.poll()
+
+    def _apply_gpu_snapshot(self, snapshot: GpuUsageSnapshot) -> None:
+        self._gpu_monitor_available = True
+        memory_percent = max(0.0, min(snapshot.memory_percent, 100.0))
+        used_gb = snapshot.memory_used_mb / 1024.0
+        total_gb = snapshot.memory_total_mb / 1024.0
+        self.progress_device_usage.show()
+        self.progress_device_usage.setValue(int(round(memory_percent)))
+        self.label_device_title.setText("GPU Mem")
+        self.label_device_percent.setText(f"{memory_percent:.0f}%")
+        self.label_runtime_info.setText(f"{used_gb:.1f}/{total_gb:.1f} GB ({memory_percent:.0f}%)")
+        self.label_runtime_info.setToolTip(snapshot.name)
+
+    def _handle_gpu_monitor_unavailable(self, _: str) -> None:
+        self._gpu_monitor_available = False
+        self._apply_gpu_memory_fallback()
+
+    def _apply_gpu_memory_fallback(self) -> None:
+        gpu_stats = self._sample_gpu_memory_stats()
+        if gpu_stats is None:
+            self.progress_device_usage.hide()
+            self.label_device_title.setText("CPU")
+            self.label_device_percent.setText("")
+            self.label_runtime_info.setText("Device: CPU training")
+            return
+
+        self.progress_device_usage.show()
+        self.progress_device_usage.setValue(int(round(max(0, min(gpu_stats["memory_percent"], 100)))))
+        self.label_device_title.setText("GPU Mem")
+        self.label_device_percent.setText(f'{gpu_stats["memory_percent"]:.0f}%')
+        self.label_runtime_info.setText(gpu_stats["text"])
+        self.label_runtime_info.setToolTip(gpu_stats["device_name"])
+
+    def _sample_gpu_memory_stats(self) -> dict | None:
         torch = self._get_torch()
         if not torch.cuda.is_available():
             return None
@@ -487,222 +506,138 @@ class TrainerWidget(QWidget, Ui_trainer_widget):
         return {
             "device_name": device_name,
             "memory_percent": usage,
-            "text": f'{used_memory / (1024 ** 3):.1f}/{total_memory / (1024 ** 3):.1f} GB ({usage:.0f}%)',
+            "text": f"{used_memory / (1024 ** 3):.1f}/{total_memory / (1024 ** 3):.1f} GB ({usage:.0f}%)",
         }
 
-    def _refresh_device_usage(self):
-        torch = self._get_torch()
-        if not torch.cuda.is_available():
-            self.progress_device_usage.hide()
-            self.label_device_title.setText("CPU")
-            self.label_device_percent.setText("")
-            self.label_runtime_info.setText("Device: CPU training")
-            return
+    # ------------------------------------------------------------------
+    # Chart / table refreshes (View-only, uses data from ViewModel)
+    # ------------------------------------------------------------------
 
-        if self._gpu_monitor_available is not True:
-            self._apply_gpu_memory_fallback()
-        self._gpu_monitor.poll()
+    def _refresh_training_time(self, cur_epoch: int) -> None:
+        one_epoch, avg_one_epoch, processed, remaining = self._training_timer.one_epoch_done(cur_epoch)
+        self.label_time.setText(
+            "Avg epoch %.1fs   Elapsed %s   Remaining %s"
+            % (avg_one_epoch, timestamp2time(processed), timestamp2time(remaining))
+        )
 
-    def _apply_gpu_snapshot(self, snapshot: GpuUsageSnapshot):
-        self._gpu_monitor_available = True
-        memory_percent = max(0.0, min(snapshot.memory_percent, 100.0))
-        used_gb = snapshot.memory_used_mb / 1024.0
-        total_gb = snapshot.memory_total_mb / 1024.0
-        self.progress_device_usage.show()
-        self.progress_device_usage.setValue(int(round(memory_percent)))
-        self.label_device_title.setText("GPU Mem")
-        self.label_device_percent.setText(f'{memory_percent:.0f}%')
-        self.label_runtime_info.setText(f'{used_gb:.1f}/{total_gb:.1f} GB ({memory_percent:.0f}%)')
-        self.label_runtime_info.setToolTip(snapshot.name)
+    def _refresh_training_time_live(self, phase_type: str, iter_idx: int, iter_len: int) -> None:
+        current_epoch = min(max(self.progress_epoch.value() + 1, 1), max(self.progress_epoch.maximum(), 1))
+        self._current_epoch_for_eta = current_epoch
+        avg_step, processed, remaining = self._training_timer.one_iter_progress(
+            phase_type, iter_idx, iter_len, current_epoch
+        )
+        phase_name = "Train" if phase_type == PHASE_TYPE_TRAINING else "Valid"
+        self.label_time.setText(
+            f"{phase_name} {iter_idx + 1}/{iter_len}   Avg step {avg_step:.2f}s"
+            f"   Elapsed {timestamp2time(processed)}   Remaining {timestamp2time(remaining)}"
+        )
 
-    def _handle_gpu_monitor_unavailable(self, _: str):
-        self._gpu_monitor_available = False
-        self._apply_gpu_memory_fallback()
+    def _refresh_existing_training_monitor(self, last_epoch: int) -> None:
+        self._refresh_training_chart(
+            self._vm.get_train_summary(),
+            self._vm.get_train_result_summary(),
+            self._vm.get_valid_result_summary(),
+        )
+        self._refresh_training_history_table(
+            self._vm.get_train_summary(),
+            self._vm.get_train_result_summary(),
+            self._vm.get_valid_result_summary(),
+        )
+        self._refresh_validation_table(last_epoch, self._vm.get_valid_result_summary())
 
-    def _apply_gpu_memory_fallback(self):
-        gpu_stats = self._sample_gpu_memory_stats()
-        if gpu_stats is None:
-            self.progress_device_usage.hide()
-            self.label_device_title.setText("CPU")
-            self.label_device_percent.setText("")
-            self.label_runtime_info.setText("Device: CPU training")
-            return
-
-        self.progress_device_usage.show()
-        self.progress_device_usage.setValue(int(round(max(0, min(gpu_stats["memory_percent"], 100)))))
-        self.label_device_title.setText("GPU Mem")
-        self.label_device_percent.setText(f'{gpu_stats["memory_percent"]:.0f}%')
-        self.label_runtime_info.setText(gpu_stats["text"])
-        self.label_runtime_info.setToolTip(gpu_stats["device_name"])
-
-    def _update_epoch_th_train(self, current_epoch: int, current_ckpt_path: str):
-        self.progress_epoch.setValue(current_epoch)
-        self._current_epoch_for_eta = current_epoch + 1
-        self.progress_iter.setValue(0)
-        self.progress_iter.setStyleSheet(gui_util.get_dark_style())
-        self._worker.save_records_after_epoch(current_epoch, current_ckpt_path)
-
-        self._refresh_training_time(current_epoch)
-        self._refresh_training_chart(self._worker.get_train_summary(), self._worker.get_train_result_summary(),
-                                     self._worker.get_valid_result_summary())
-        self._refresh_training_history_table(self._worker.get_train_summary(), self._worker.get_train_result_summary(),
-                                             self._worker.get_valid_result_summary())
-        self._refresh_validation_table(current_epoch, self._worker.get_valid_result_summary())
-
-    def _update_iter_th_train(self, phase_type: str, iter_idx: int, iter_len: int):
-        if phase_type == PHASE_TYPE_TRAINING:
-            self.progress_iter.setStyleSheet(TrainerWidget.COLOR_TRAINING)
-        elif phase_type == PHASE_TYPE_VALIDATION:
-            self.progress_iter.setStyleSheet(TrainerWidget.COLOR_VALIDATION)
-        else:
-            raise NotImplementedError
-
-        self.progress_iter.setMaximum(iter_len)
-        self.progress_iter.setValue(iter_idx + 1)
-        now = time.monotonic()
-        is_last_iter = iter_len > 0 and (iter_idx + 1) >= iter_len
-        if is_last_iter or (now - self._last_iter_ui_update_ts) >= 0.15:
-            self._last_iter_ui_update_ts = now
-            self._refresh_training_time_live(phase_type, iter_idx, iter_len)
-
-    def show(self):
-        super().show()
-        self._refresh_resume_ui()
-
-        if len(self._worker.get_train_summary().tr_by_epoch.keys()) == 0:
-            return
-
-        try:
-            last_epoch = list(self._worker.get_train_summary().tr_by_epoch.keys())[-1]
-            self._refresh_training_chart(self._worker.get_train_summary(), self._worker.get_train_result_summary(),
-                                         self._worker.get_valid_result_summary())
-            self._refresh_training_history_table(self._worker.get_train_summary(),
-                                                 self._worker.get_train_result_summary(),
-                                                 self._worker.get_valid_result_summary())
-            self._refresh_validation_table(last_epoch, self._worker.get_valid_result_summary())
-        except Exception as e:
-            pass
-
-
-    def _init_training_chart(self):
+    def _init_training_chart(self) -> None:
         self._canvas_graph.reset()
         self._canvas_graph_metric.reset()
-        self._canvas_graph.setName('Train Loss')
-        self._canvas_graph.setBottomName('Epoch')
-        self._canvas_graph.setLine('Loss', [], QtGui.QColor(205, 92, 92), 2)
+        self._canvas_graph.setName("Train Loss")
+        self._canvas_graph.setBottomName("Epoch")
+        self._canvas_graph.setLine("Loss", [], QtGui.QColor(205, 92, 92), 2)
 
-        self._canvas_graph_metric.setName(f'Validation {self._worker.metric_name}')
-        self._canvas_graph_metric.setBottomName('Epoch')
-        self._canvas_graph_metric.setLine(self._worker.metric_name, [], QtGui.QColor(92, 205, 92), 2)
+        self._canvas_graph_metric.setName(f"Validation {self._vm.metric_name}")
+        self._canvas_graph_metric.setBottomName("Epoch")
+        self._canvas_graph_metric.setLine(self._vm.metric_name, [], QtGui.QColor(92, 205, 92), 2)
 
-    def _init_training_history(self):
+    def _init_training_history(self) -> None:
         self.table_training_history.clear()
-        h_names = ['Train\nLoss', 'Valid\n%s' % self._worker.metric_name,
-                   'Corner\nError',
-                   'Corner\nX',
-                   'Corner\nY',
-                   'Center\nError',
-                   'Center\nX',
-                   'Center\nY',
-                   'Longside\nError',
-                   'Shortside\nError', 'Update']
-
+        h_names = [
+            "Train\nLoss", f"Valid\n{self._vm.metric_name}",
+            "Corner\nError", "Corner\nX", "Corner\nY",
+            "Center\nError", "Center\nX", "Center\nY",
+            "Longside\nError", "Shortside\nError", "Update",
+        ]
         self.table_training_history.setColumnCount(len(h_names))
         self.table_training_history.setHorizontalHeaderLabels(h_names)
         self.table_training_history.setRowCount(1)
 
-    def _init_validation_table(self):
+    def _init_validation_table(self) -> None:
         self.table_validation.clear()
 
-    def _refresh_training_chart(self, worker_train_summary: TrainSummary,
-                                worker_train_result_summary: ResultSummary,
-                                worker_valid_result_summary: ResultSummary):
+    def _refresh_training_chart(
+        self,
+        worker_train_summary: TrainSummary,
+        worker_train_result_summary: ResultSummary,
+        worker_valid_result_summary: ResultSummary,
+    ) -> None:
         tr_loss = []
         va_metric = []
         for epoch in worker_train_summary.tr_by_epoch:
-            tr_loss.append(worker_train_summary.tr_by_epoch[epoch]['loss'])
-
+            tr_loss.append(worker_train_summary.tr_by_epoch[epoch]["loss"])
             if epoch in worker_train_summary.va_by_epoch:
                 if epoch in worker_valid_result_summary.map:
-                    va_metric.append(worker_valid_result_summary.get_metric(epoch, self._worker.metric_name))
+                    va_metric.append(worker_valid_result_summary.get_metric(epoch, self._vm.metric_name))
                 else:
-                    if len(va_metric) > 0:
-                        va_metric.append(va_metric[-1])
-                    else:
-                        va_metric.append(0)
+                    va_metric.append(va_metric[-1] if va_metric else 0)
             else:
                 va_metric.append(numpy.nan)
 
-        self._canvas_graph.setName('Train Loss')
-        self._canvas_graph.setLine('Loss', tr_loss, QtGui.QColor(205, 92, 92), 2)
+        self._canvas_graph.setName("Train Loss")
+        self._canvas_graph.setLine("Loss", tr_loss, QtGui.QColor(205, 92, 92), 2)
+        self._canvas_graph_metric.setName(f"Validation {self._vm.metric_name}")
+        self._canvas_graph_metric.setLine(self._vm.metric_name, va_metric, QtGui.QColor(92, 205, 92), 2)
 
-        self._canvas_graph_metric.setName(f'Validation {self._worker.metric_name}')
-        self._canvas_graph_metric.setLine(self._worker.metric_name, va_metric, QtGui.QColor(92, 205, 92), 2)
-
-    def _refresh_training_history_table(self, worker_train_summary: TrainSummary,
-                                        worker_train_result_summary: ResultSummary,
-                                        worker_valid_result_summary: ResultSummary):
+    def _refresh_training_history_table(
+        self,
+        worker_train_summary: TrainSummary,
+        worker_train_result_summary: ResultSummary,
+        worker_valid_result_summary: ResultSummary,
+    ) -> None:
         self.table_training_history.clear()
-
-        h_names = ['Train\nLoss', 'Valid\n%s' % self._worker.metric_name,
-                   'Corner\nError',
-                   'Corner\nX',
-                   'Corner\nY',
-                   'Center\nError',
-                   'Center\nX',
-                   'Center\nY',
-                   'Longside\nError',
-                   'Shortside\nError', 'Update']
+        h_names = [
+            "Train\nLoss", f"Valid\n{self._vm.metric_name}",
+            "Corner\nError", "Corner\nX", "Corner\nY",
+            "Center\nError", "Center\nX", "Center\nY",
+            "Longside\nError", "Shortside\nError", "Update",
+        ]
         self.table_training_history.setColumnCount(len(h_names))
         self.table_training_history.setHorizontalHeaderLabels(h_names)
         self.table_training_history.setRowCount(len(worker_train_summary.tr_by_epoch))
 
         header_epoch_map = {}
-
         for idx, (ep, info) in enumerate(worker_train_summary.tr_by_epoch.items()):
             self.table_training_history.setVerticalHeaderItem(idx, QTableWidgetItem(str(ep)))
-            self.table_training_history.setItem(idx, 0, QTableWidgetItem('%.4lf' % info['loss']))
+            self.table_training_history.setItem(idx, 0, QTableWidgetItem("%.4lf" % info["loss"]))
             header_epoch_map[ep] = idx
 
         for ep, info in worker_train_summary.va_by_epoch.items():
             idx = header_epoch_map[ep]
-            self.table_training_history.setItem(idx, 1, QTableWidgetItem(
-                '%.4lf' % worker_valid_result_summary.get_metric(ep, self._worker.metric_name)))
-
-            mPE = worker_valid_result_summary.get_metric(ep, 'mPE')
-            corner_error = f'{mPE["corner_error"]:.1f}'
-            self.table_training_history.setItem(idx, 2, QTableWidgetItem(corner_error))
-
-            corner_dx = f'{mPE["corner_dx"]:.1f}'
-            self.table_training_history.setItem(idx, 3, QTableWidgetItem(corner_dx))
-
-            corner_dy = f'{mPE["corner_dy"]:.1f}'
-            self.table_training_history.setItem(idx, 4, QTableWidgetItem(corner_dy))
-
-            center_error = f'{mPE["center_error"]:.1f}'
-            self.table_training_history.setItem(idx, 5, QTableWidgetItem(center_error))
-
-            center_dx = f'{mPE["center_dx"]:.1f}'
-            self.table_training_history.setItem(idx, 6, QTableWidgetItem(center_dx))
-
-            center_dy = f'{mPE["center_dy"]:.1f}'
-            self.table_training_history.setItem(idx, 7, QTableWidgetItem(center_dy))
-
-            longside = f'{mPE["longside"]:.1f}'
-            self.table_training_history.setItem(idx, 8, QTableWidgetItem(longside))
-
-            shortside = f'{mPE["shortside"]:.1f}'
-            self.table_training_history.setItem(idx, 9, QTableWidgetItem(shortside))
+            self.table_training_history.setItem(
+                idx, 1, QTableWidgetItem("%.4lf" % worker_valid_result_summary.get_metric(ep, self._vm.metric_name))
+            )
+            mPE = worker_valid_result_summary.get_metric(ep, "mPE")
+            for col, key in enumerate(
+                ["corner_error", "corner_dx", "corner_dy", "center_error", "center_dx", "center_dy", "longside", "shortside"],
+                start=2,
+            ):
+                self.table_training_history.setItem(idx, col, QTableWidgetItem(f"{mPE[key]:.1f}"))
 
         for updated_epoch in worker_train_summary.update_model_epoch:
             idx = header_epoch_map[updated_epoch]
-            self.table_training_history.setItem(idx, 10, QTableWidgetItem('O'))
+            self.table_training_history.setItem(idx, 10, QTableWidgetItem("O"))
 
         self.table_training_history.resizeColumnsToContents()
         self.table_training_history.resizeRowsToContents()
         self.table_training_history.scrollToBottom()
 
-    def _refresh_validation_table(self, epoch: int, worker_valid_result_summary: ResultSummary):
+    def _refresh_validation_table(self, epoch: int, worker_valid_result_summary: ResultSummary) -> None:
         self.table_validation.clear()
         self.table_validation.clearSpans()
         n_class = len(worker_valid_result_summary.class_name)
@@ -712,34 +647,40 @@ class TrainerWidget(QWidget, Ui_trainer_widget):
         h_class_names = [worker_valid_result_summary.class_name[i] for i in range(n_class)]
         self.table_validation.setColumnCount(len(h_class_names))
         self.table_validation.setHorizontalHeaderLabels(h_class_names)
-        v_class_names = ['#', 'AP', 'Epoch', self._worker.metric_name, 'Corner Error', 'Corner X', 'Corner Y',
-                         'Center Error', 'Center X', 'Center Y', 'Width Error', 'Height Error']
+        v_class_names = [
+            "#", "AP", "Epoch", self._vm.metric_name,
+            "Corner Error", "Corner X", "Corner Y",
+            "Center Error", "Center X", "Center Y",
+            "Width Error", "Height Error",
+        ]
         self.table_validation.setRowCount(len(v_class_names))
         self.table_validation.setVerticalHeaderLabels(v_class_names)
 
         def format_metric(value):
             if value is None:
-                return '-'
+                return "-"
             try:
                 if numpy.isnan(value):
-                    return '-'
+                    return "-"
             except TypeError:
                 pass
-            return f'{value:.1f}'
+            return f"{value:.1f}"
 
         if epoch in worker_valid_result_summary.aps:
             aps = worker_valid_result_summary.aps[epoch]
             if aps is not None:
                 for c in range(n_class):
-                    self.table_validation.setItem(0, c, QTableWidgetItem(str(int(aps[c][1]))))  # num gts
-                    self.table_validation.item(0, c).setTextAlignment(Qt.AlignCenter)
-                    self.table_validation.item(0, c).setBackground(QtGui.QColor(144, 164, 174))
+                    item_count = QTableWidgetItem(str(int(aps[c][1])))
+                    item_count.setTextAlignment(Qt.AlignCenter)
+                    item_count.setBackground(QtGui.QColor(144, 164, 174))
+                    self.table_validation.setItem(0, c, item_count)
 
-                    self.table_validation.setItem(1, c, QTableWidgetItem('%.2lf' % aps[c][0]))  # ap
-                    self.table_validation.item(1, c).setTextAlignment(Qt.AlignCenter)
-                    self.table_validation.item(1, c).setBackground(QtGui.QColor(144, 164, 174))
+                    item_ap = QTableWidgetItem("%.2lf" % aps[c][0])
+                    item_ap.setTextAlignment(Qt.AlignCenter)
+                    item_ap.setBackground(QtGui.QColor(144, 164, 174))
+                    self.table_validation.setItem(1, c, item_ap)
 
-        def set_overall_row(row_no: int, text: str):
+        def set_overall_row(row_no: int, text: str) -> None:
             self.table_validation.setSpan(row_no, 0, 1, n_class)
             item = QTableWidgetItem(text)
             item.setTextAlignment(Qt.AlignCenter)
@@ -749,23 +690,17 @@ class TrainerWidget(QWidget, Ui_trainer_widget):
         set_overall_row(2, str(epoch))
 
         if epoch in worker_valid_result_summary.map:
-            map = worker_valid_result_summary.map[epoch]
-            set_overall_row(3, '%.4lf' % map)
+            set_overall_row(3, "%.4lf" % worker_valid_result_summary.map[epoch])
 
         if epoch in worker_valid_result_summary.mpe:
-            mpe = worker_valid_result_summary.get_metric(epoch, 'mPE')
+            mpe = worker_valid_result_summary.get_metric(epoch, "mPE")
             class_metrics = worker_valid_result_summary.mpe_by_class.get(epoch, {})
+            row_key_map = {
+                4: "corner_error", 5: "corner_dx", 6: "corner_dy",
+                7: "center_error", 8: "center_dx", 9: "center_dy",
+                10: "longside", 11: "shortside",
+            }
             if class_metrics:
-                row_key_map = {
-                    4: 'corner_error',
-                    5: 'corner_dx',
-                    6: 'corner_dy',
-                    7: 'center_error',
-                    8: 'center_dx',
-                    9: 'center_dy',
-                    10: 'longside',
-                    11: 'shortside',
-                }
                 for row_no, metric_key in row_key_map.items():
                     for c in range(n_class):
                         value = class_metrics.get(c, {}).get(metric_key)
@@ -773,18 +708,39 @@ class TrainerWidget(QWidget, Ui_trainer_widget):
                         item.setTextAlignment(Qt.AlignCenter)
                         self.table_validation.setItem(row_no, c, item)
             else:
-                set_overall_row(4, f'{mpe["corner_error"]:.1f}')
-                set_overall_row(5, f'{mpe["corner_dx"]:.1f}')
-                set_overall_row(6, f'{mpe["corner_dy"]:.1f}')
-                set_overall_row(7, f'{mpe["center_error"]:.1f}')
-                set_overall_row(8, f'{mpe["center_dx"]:.1f}')
-                set_overall_row(9, f'{mpe["center_dy"]:.1f}')
-                set_overall_row(10, f'{mpe["longside"]:.1f}')
-                set_overall_row(11, f'{mpe["shortside"]:.1f}')
+                for row_no, metric_key in row_key_map.items():
+                    set_overall_row(row_no, f"{mpe[metric_key]:.1f}")
 
         self.table_validation.resizeColumnsToContents()
         self.table_validation.resizeRowsToContents()
 
-    def _clicked_table_training_history(self):
-        epoch = self.table_training_history.currentRow() + 1
-        self._refresh_validation_table(epoch, self._worker.get_valid_result_summary())
+    # ------------------------------------------------------------------
+    # QWidget lifecycle
+    # ------------------------------------------------------------------
+
+    def show(self) -> None:
+        super().show()
+        self._vm.refresh_resume_state()
+
+        train_summary = self._vm.get_train_summary()
+        if not train_summary.tr_by_epoch:
+            return
+        try:
+            last_epoch = list(train_summary.tr_by_epoch.keys())[-1]
+            self._refresh_training_chart(
+                train_summary,
+                self._vm.get_train_result_summary(),
+                self._vm.get_valid_result_summary(),
+            )
+            self._refresh_training_history_table(
+                train_summary,
+                self._vm.get_train_result_summary(),
+                self._vm.get_valid_result_summary(),
+            )
+            self._refresh_validation_table(last_epoch, self._vm.get_valid_result_summary())
+        except Exception:
+            pass
+
+    def close(self) -> bool:
+        self._vm.close()
+        return super().close()
