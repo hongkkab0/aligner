@@ -65,6 +65,13 @@ class MainWindowViewModel(ViewModelBase):
     # MainWindow connects this to enable/disable toolbar actions.
     app_status_changed = QtCore.pyqtSignal(bool)
 
+    # Emitted when the active tab changes.
+    # Payload: (tab_name, widget, show_log)  — MainWindow handles all layout updates.
+    tab_switched = QtCore.pyqtSignal(str, object, bool)
+
+    # Emitted whenever the window title should be updated with a new string.
+    window_title_changed = QtCore.pyqtSignal(str)
+
     class _TabManager:
         """Manages tab widget lifecycle: lazy creation, caching, and teardown.
 
@@ -140,7 +147,7 @@ class MainWindowViewModel(ViewModelBase):
         self.session = ProjectSession(project_path, is_new=self._is_new)
         self._prewarm_queue = []
         self._prewarm_active = False
-        self.view.setWindowTitle(__appname__ + " - " + project_path)
+        self.window_title_changed.emit(f"{__appname__} - {project_path}")
         self.view.log_widget_container.hide()
         gui_util.update_layout(self.view.layout_main, self._loading_label)
 
@@ -195,22 +202,10 @@ class MainWindowViewModel(ViewModelBase):
             QApplication.restoreOverrideCursor()
             self.view.statusBar().showMessage("Ready", 3000)
 
-    def show_tab(self, tab_name: str, show_log: bool):
-        if show_log:
-            self.view.log_widget_container.show()
-            if tab_name == self.TAB_TRAINER:
-                gui_util.update_layout(self.view.layout_log, self.view.trainer_log_widget)
-            elif tab_name == self.TAB_TESTER:
-                gui_util.update_layout(self.view.layout_log, self.view.tester_log_widget)
-        else:
-            self.view.log_widget_container.hide()
-
+    def show_tab(self, tab_name: str, show_log: bool) -> None:
         widget = self._get_tab_widget(tab_name)
-        gui_util.update_layout(self.view.layout_main, widget)
-        self.view.action_labeler.setChecked(tab_name == self.TAB_LABELER)
-        self.view.action_trainer.setChecked(tab_name == self.TAB_TRAINER)
-        self.view.action_test.setChecked(tab_name == self.TAB_TESTER)
-        self.view.setWindowTitle(__appname__ + " - " + self._project_path)
+        self.window_title_changed.emit(f"{__appname__} - {self._project_path}")
+        self.tab_switched.emit(tab_name, widget, show_log)
 
     def _reload_tester_if_loaded(self) -> None:
         tester_view = self._tabs.get(self.TAB_TESTER)

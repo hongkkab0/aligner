@@ -22,10 +22,14 @@ if TYPE_CHECKING:
 
 
 class LabelerViewModel(ViewModelBase):
-    def __init__(self, view: 'LabelerView', image_index_thread_cls: type['ImageIndexThread']):
+    def __init__(self, view: 'LabelerView', image_index_thread_cls: type['ImageIndexThread'], session=None):
         super().__init__(view)
         self.view = view
         self._image_index_thread_cls = image_index_thread_cls
+        self._session = session
+
+    def is_there_trained_checkpoint(self) -> bool:
+        return self._session is not None and self._session.is_there_trained_checkpoint()
 
     def set_labeler_image_list_to_file(self, image_paths):
         try:

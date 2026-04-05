@@ -483,7 +483,7 @@ class LabelerView(QMainWindow):
         self.zoomWidget.valueChanged.connect(self.paintCanvas)
 
         # initialize image_paths
-        self.viewmodel = LabelerViewModel(self, ImageIndexThread)
+        self.viewmodel = LabelerViewModel(self, ImageIndexThread, self._worker)
         self.viewmodel.status_message_requested.connect(self.status)
         if self._is_new == True:
             self.viewmodel.set_labeler_image_list_to_file([])
@@ -1211,7 +1211,7 @@ class LabelerView(QMainWindow):
             osp_path = os.path.join(*paths)
             return osp_path.replace('\\', '/')
 
-        if not self._worker.is_there_trained_checkpoint():
+        if not self.viewmodel.is_there_trained_checkpoint():
             gui_util.get_message_box(self, "Invalid Export", "There is no trained model. "
                                                              "To use Auto Labeling function, You have to train a model with some labeled data before.")
             return

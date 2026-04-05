@@ -33,6 +33,7 @@ class TesterViewModel(ViewModelBase):
     iter_progress_updated = pyqtSignal(int, int)  # (iter_idx, iter_len)
     results_updated = pyqtSignal()
     test_blocked = pyqtSignal(str, str)         # (title, message) — view shows a dialog
+    file_list_changed = pyqtSignal()            # emitted after any mutation to _file_list
 
     def __init__(self, session, parent=None) -> None:
         super().__init__(parent)
@@ -70,20 +71,32 @@ class TesterViewModel(ViewModelBase):
 
     def append_files(self, paths: list[str]) -> None:
         seen = {p.lower() for p in self._file_list}
+        added = False
         for path in paths:
             normalized = os.path.abspath(path)
             if normalized.lower() not in seen:
                 seen.add(normalized.lower())
                 self._file_list.append(normalized)
+                added = True
+        if added:
+            self.file_list_changed.emit()
 
     def remove_files_at_rows(self, rows: list[int]) -> None:
         for row in sorted(rows, reverse=True):
             if 0 <= row < len(self._file_list):
                 self._file_list.pop(row)
+        self.file_list_changed.emit()
 
     def reset_file_list(self, paths: list[str]) -> None:
         self._file_list = []
-        self.append_files(paths)
+        # Bypass append_files to avoid intermediate signal emissions, emit once at end
+        seen: set[str] = set()
+        for path in paths:
+            normalized = os.path.abspath(path)
+            if normalized.lower() not in seen:
+                seen.add(normalized.lower())
+                self._file_list.append(normalized)
+        self.file_list_changed.emit()
 
     # ------------------------------------------------------------------
     # Test lifecycle commands (called by View)
