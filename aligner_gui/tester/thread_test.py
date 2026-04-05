@@ -4,7 +4,7 @@ from PyQt5.QtCore import *
 
 import logging
 import traceback
-from aligner_gui.utils import const
+from aligner_gui.shared import const
 
 TEST_LOGGER = logging.getLogger("aligner.tester")
 
@@ -54,3 +54,4 @@ class ThreadTest(QThread):
 
     def _main(self):
         self._worker.start_test(self.callback_one_iter_finished, self._img_paths_to_test)
+

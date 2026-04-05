@@ -4,9 +4,9 @@ import logging
 from aligner_gui.ui.project_open_dlg import Ui_project_open_dlg
 from PyQt5.QtWidgets import QDialog, QPushButton
 from PyQt5 import QtGui, QtWidgets, QtCore
-from aligner_gui.utils import const
-from aligner_gui.utils import io_util
-from aligner_gui.utils import gui_util
+from aligner_gui.shared import const
+from aligner_gui.shared import io_util
+from aligner_gui.shared import gui_util
 from aligner_engine.const import PROJECT_CONFIG_NAME
 from aligner_engine.version import VERSION
 
@@ -165,3 +165,4 @@ class ProjectOpenDialog(QDialog, Ui_project_open_dlg):
             self.recent_path_list.append(path)
 
         return False
+

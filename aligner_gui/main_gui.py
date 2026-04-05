@@ -71,7 +71,7 @@ def check_activation(app):
 
 
 def make_app():
-    from aligner_gui.utils import gui_util
+    from aligner_gui.shared import gui_util
     from PyQt5.QtWidgets import QApplication
     from PyQt5.QtGui import QFont
 
@@ -153,3 +153,4 @@ if __name__ == '__main__':
 
     os.chdir(ROOT_PATH)  # change working directory
     main_window = main()
+

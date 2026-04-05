@@ -10,8 +10,8 @@ from PyQt5.QtGui import QColor, QFont, QPainter, QPen, QPixmap, QPolygonF
 
 from aligner_engine.mm_rotate_det.dice.remove_rotation import remove_rotation
 from aligner_engine.summary import ResultSummary
-from aligner_gui.utils import gui_util
-from aligner_gui.utils.image_cache import CachedImageReader, decode_image_with_cv2
+from aligner_gui.shared import gui_util
+from aligner_gui.shared.image_cache import CachedImageReader, decode_image_with_cv2
 
 
 class TesterPreviewRenderer:
@@ -228,3 +228,4 @@ class TesterPreviewRenderer:
         self._preview_cache.move_to_end(cache_key)
         while len(self._preview_cache) > self._preview_cache_size:
             self._preview_cache.popitem(last=False)
+

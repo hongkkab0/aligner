@@ -11,7 +11,7 @@ from aligner_gui import __appname__
 from PyQt5.QtGui import *
 from PyQt5.QtCore import *
 from PyQt5.QtWidgets import *
-from aligner_gui.utils import io_util
+from aligner_gui.shared import io_util
 import cv2
 import numpy as np
 
@@ -141,3 +141,4 @@ class LabelFile(object):
 
     def get_is_need_confirm(self):
         return self._is_need_confirm
+
