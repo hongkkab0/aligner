@@ -340,7 +340,7 @@ class TrainerView(QWidget, Ui_trainer_widget):
         dlg = ProgressGeneralDialog(
             "Preparing training...",
             self.viewmodel.prepare_training_assets,
-            steps=2,
+            2,
         )
         dlg.exec_()
 
