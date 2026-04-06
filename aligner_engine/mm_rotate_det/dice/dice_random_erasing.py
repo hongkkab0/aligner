@@ -132,14 +132,14 @@ class DiceRandomErasing(BaseTransform):
         for [px1, py1, px2, py2] in patches:
             rect = Polygon([(px1, py1), (px1, py2), (px2, py2), (px2, py1)])
             if not rect.is_valid:
-                make_valid(rect)
+                rect = make_valid(rect)
             patches_polygon.append(rect)
 
         bboxes_poly = []
         for rbox in bboxes.tensor:
             bbox = Polygon((RotatedBoxes.rbox2corner(rbox.clone().detach())).tolist())
             if not bbox.is_valid:
-                make_valid(bbox)
+                bbox = make_valid(bbox)
             bboxes_poly.append(bbox)
 
         for bbox in bboxes_poly:
@@ -152,8 +152,10 @@ class DiceRandomErasing(BaseTransform):
     def transform(self, results: dict) -> dict:
         """Transform function to erase some regions of image."""
         patches = self._get_patches(results['img_shape'])
-        if results.get('gt_bboxes', None) is not None:
+        if results.get('gt_bboxes', None) is not None and len(results['gt_bboxes']) > 0:
             patches_valid = self._transform_bboxes(results, patches)
+        else:
+            patches_valid = [True for _ in range(len(patches))]
         self._transform_img(results, patches, patches_valid)
         return results
 

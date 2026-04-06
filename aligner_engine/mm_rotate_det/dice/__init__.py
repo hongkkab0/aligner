@@ -11,6 +11,7 @@ from aligner_engine.mm_rotate_det.dice.dice_random_sampler import DiceRandomSubs
 from aligner_engine.mm_rotate_det.dice.dice_shift_to_center import DiceShiftToCenter
 from aligner_engine.mm_rotate_det.dice.dice_random_rotate import DiceRandomRotate
 from aligner_engine.mm_rotate_det.dice.dice_rotated_iou_loss import DiceRotatedIouLoss
+from aligner_engine.mm_rotate_det.dice.dice_copy_paste import DiceCopyPaste
 
 __all__ = [
     "DiceRotateDetDataset",
@@ -26,4 +27,5 @@ __all__ = [
     "DiceShiftToCenter",
     "DiceRandomRotate",
     "DiceRotatedIouLoss",
+    "DiceCopyPaste",
 ]
