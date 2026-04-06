@@ -12,7 +12,7 @@ from PyQt5.QtGui import *
 from PyQt5.QtCore import *
 from PyQt5.QtWidgets import *
 import json
-from typing import List, Set, Dict, Tuple
+from typing import List
 
 import aligner_gui.labeler.resources
 # Add internal libs
@@ -78,7 +78,6 @@ class ImageIndexThread(QThread):
 
 class LabelerView(QMainWindow):
     FIT_WINDOW, FIT_WIDTH, MANUAL_ZOOM = list(range(3))
-    IMAGE_LIST_BATCH_SIZE = 250
     ZOOM_WHEEL_FACTOR = 1.05
 
     def __init__(self, main_window, session, project_path, is_new: bool):
@@ -87,14 +86,10 @@ class LabelerView(QMainWindow):
         # For loading all image under a directory
         from aligner_gui.main_window import MainWindow
         self._main_window: MainWindow = main_window
-        self._image_paths: List[str] = []
         self._dir_name = None
         self._project_path: str = project_path
         self._worker = session
-        self._image_index_thread: ImageIndexThread | None = None
         self._image_index_progress: QProgressDialog | None = None
-        self._pending_image_states = []
-        self._pending_image_state_index = 0
         self._autosave_timer = QTimer(self)
         self._autosave_timer.setSingleShot(True)
         self._autosave_timer.setInterval(250)
@@ -155,9 +150,6 @@ class LabelerView(QMainWindow):
         self._file_list_widget.itemClicked.connect(self._file_list_item_clicked)
         self._file_list_widget.itemSelectionChanged.connect(self._item_selected_changed_file_list)
 
-        self._file_list_total_count = 0
-        self._file_list_labeled_count = 0
-        self._labeled_info_dict: Dict[str, bool] = {}  # key: img_path, val: True, if It is labeled.
         self._lbl_file_list_info = QLabel(self)
         self._lbl_file_list_info.setLineWidth(-1)
         self._lbl_file_list_info.setText("")
@@ -482,13 +474,41 @@ class LabelerView(QMainWindow):
         # Callbacks:
         self.zoomWidget.valueChanged.connect(self.paintCanvas)
 
-        # initialize image_paths
-        self.viewmodel = LabelerViewModel(self, ImageIndexThread, self._worker)
+        # initialize viewmodel and wire signals
+        self.viewmodel = LabelerViewModel(
+            ImageIndexThread, self._project_path, session=self._worker, parent=self
+        )
         self.viewmodel.status_message_requested.connect(self.status)
-        if self._is_new == True:
-            self.viewmodel.set_labeler_image_list_to_file([])
 
-        image_paths = self.viewmodel.get_labeler_image_list_from_file()
+        # image indexing lifecycle
+        self.viewmodel.image_index_started.connect(self._on_image_index_started)
+        self.viewmodel.image_index_progress.connect(self._on_image_index_progress)
+        self.viewmodel.image_index_completed.connect(self._on_image_index_completed)
+        self.viewmodel.image_index_failed.connect(self._on_image_index_failed)
+
+        # file list state
+        self.viewmodel.file_list_cleared.connect(self._file_list_widget.clear)
+        self.viewmodel.file_list_batch_ready.connect(self._on_file_list_batch_ready)
+        self.viewmodel.file_list_enabled_changed.connect(self._file_list_widget.setEnabled)
+        self.viewmodel.file_list_item_state_changed.connect(self._on_file_list_item_state_changed)
+        self.viewmodel.file_list_items_removed.connect(self._on_file_list_items_removed)
+        self.viewmodel.file_list_info_updated.connect(self._on_file_list_info_updated)
+
+        # navigation
+        self.viewmodel.navigate_to_image.connect(self._load_file)
+        self.viewmodel.navigate_reset.connect(self._on_navigate_reset)
+
+        # label state
+        self.viewmodel.label_saved.connect(self._set_clean)
+        self.viewmodel.label_files_deleted.connect(self._on_label_files_deleted)
+
+        # image reader
+        self.viewmodel.image_reader_clear_requested.connect(self._image_reader.clear)
+
+        if self._is_new:
+            self.viewmodel.save_labeler_image_list([])
+
+        image_paths = self.viewmodel.get_labeler_image_list()
         self.viewmodel.load_images(image_paths)
 
     @staticmethod
@@ -683,10 +703,7 @@ class LabelerView(QMainWindow):
         if text is None:
             return
 
-        img_paths = []
-        for img_path, is_labeled in self._labeled_info_dict.items():
-            if is_labeled:
-                img_paths.append(img_path)
+        img_paths = self.viewmodel.get_labeled_image_paths()
 
         def work(idx: int):
             try:
@@ -732,8 +749,8 @@ class LabelerView(QMainWindow):
         dlg.exec_()
 
         gui_util.get_message_box(self, "Apply kept box to all", "Appling kept box to all label files was successfully.")
-        image_paths = self._get_labeler_image_list_from_file()
-        self._load_images(image_paths)
+        image_paths = self.viewmodel.get_labeler_image_list()
+        self.viewmodel.load_images(image_paths)
 
 
 
@@ -749,9 +766,10 @@ class LabelerView(QMainWindow):
         target_path = ustr(item.text())
         if target_path == self._current_image_path:
             return
-        currIndex = self._image_paths.index(target_path)
-        if currIndex < len(self._image_paths):
-            filename = self._image_paths[currIndex]
+        image_paths = self.viewmodel.get_image_paths()
+        currIndex = image_paths.index(target_path)
+        if currIndex < len(image_paths):
+            filename = image_paths[currIndex]
             if filename:
                 self._load_file(filename)
 
@@ -984,7 +1002,8 @@ class LabelerView(QMainWindow):
         # Tzutalin 20160906 : Add file list and dock to move faster
         # Highlight the file item
         if unicodeFilePath and self._file_list_widget.count() > 0:
-            index = self._image_paths.index(unicodeFilePath)
+            image_paths = self.viewmodel.get_image_paths()
+            index = image_paths.index(unicodeFilePath)
             fileWidgetItem = self._file_list_widget.item(index)
             fileWidgetItem.setSelected(True)
 
@@ -1071,9 +1090,7 @@ class LabelerView(QMainWindow):
         return w / self.canvas.pixmap.width()
 
     def closeEvent(self, event):
-        if self._image_index_thread is not None and self._image_index_thread.isRunning():
-            self._image_index_thread.request_cancel()
-            self._image_index_thread.wait(3000)
+        self.viewmodel.close()
         if self._image_index_progress is not None:
             self._image_index_progress.close()
             self._image_index_progress.deleteLater()
@@ -1100,50 +1117,118 @@ class LabelerView(QMainWindow):
         images.sort(key=lambda x: x.lower())
         return images
 
+    # ------------------------------------------------------------------
+    # View command methods — called by actions / shortcuts
+    # ------------------------------------------------------------------
+
     def _open_dir(self, _value=False):
-        self.viewmodel.open_dir(_value)
-
-    def _set_labeler_image_list_to_file(self, image_paths):
-        self.viewmodel.set_labeler_image_list_to_file(image_paths)
-
-    def _get_labeler_image_list_from_file(self):
-        return self.viewmodel.get_labeler_image_list_from_file()
-
-    def _load_images(self, img_paths):
-        self.viewmodel.load_images(img_paths)
-
-    def _progress_image_index(self, cur_idx: int, total: int, path: str):
-        self.viewmodel.progress_image_index(cur_idx, total, path)
-
-    def _completed_image_index(self, states, was_cancelled: bool):
-        self.viewmodel.completed_image_index(states, was_cancelled)
-
-    def _failed_image_index(self, message: str):
-        self.viewmodel.failed_image_index(message)
-
-    def _apply_image_states(self, states):
-        self.viewmodel.apply_image_states(states)
-
-    def _append_next_image_state_batch(self):
-        self.viewmodel.append_next_image_state_batch()
-
-    def _finish_apply_image_states(self):
-        self.viewmodel.finish_apply_image_states()
+        if not self.mayContinue():
+            return
+        path = os.path.dirname(self._current_image_path) if self._current_image_path else '.'
+        if self.lastOpenDir is not None and len(self.lastOpenDir) > 1:
+            path = self.lastOpenDir
+        dirpath = self.tr(str(QFileDialog.getExistingDirectory(
+            self,
+            '%s - Open Directory' % __appname__,
+            path,
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
+        )))
+        if not dirpath:
+            return
+        self.lastOpenDir = dirpath
+        self._dir_name = dirpath
+        self._current_image_path = None
+        image_paths = self.scanAllImages(dirpath)
+        self.viewmodel.save_labeler_image_list(image_paths)
+        self.viewmodel.load_images(image_paths)
 
     def openPrevImg(self, _value=False):
-        self.viewmodel.open_previous_image(_value)
+        if not self.mayContinue():
+            return
+        self.viewmodel.navigate_to_previous(self._current_image_path)
 
     def openNextImg(self, _value=False):
-        self.viewmodel.open_next_image(_value)
+        if not self.mayContinue():
+            return
+        self.viewmodel.navigate_to_next(self._current_image_path)
 
     def openFile(self, _value=False):
-        self.viewmodel.open_file(_value)
+        if not self.mayContinue():
+            return
+        path = os.path.dirname(self._current_image_path) if self._current_image_path else '.'
+        formats = gui_util.SUPPORTED_IMAGE_FORMATS
+        label_file_class = self._get_label_file_class()
+        filters = "Image & Label files (%s)" % ' '.join(formats + ['*%s' % label_file_class.SUFFIX])
+        filename = QFileDialog.getOpenFileName(
+            self, '%s - Choose Image or Label file' % __appname__, path, filters
+        )
+        if filename:
+            if isinstance(filename, (tuple, list)):
+                filename = filename[0]
+            self._load_file(filename)
 
     def _save_label(self, _value=False):
-        self.viewmodel.save_label(_value)
+        if self._current_image_path is None or self._current_image.isNull():
+            return
+        self.viewmodel.save_label(
+            self._current_image_path,
+            self.canvas.get_shape(),
+            self._current_image.width(),
+            self._current_image.height(),
+            self._current_image.isGrayscale(),
+        )
 
     def _save_selected_labels(self, _value=False):
-        self.viewmodel.save_selected_labels(_value)
+        target_paths = self._get_selected_paths()
+        if not target_paths or self._current_image_path is None:
+            return
+        selected_shapes = deepcopy(self.canvas.get_shape())
+        if len(target_paths) > 1:
+            msg = self.tr(
+                "Save current labels to {} selected images?\r\n"
+                "Existing label files of those images will be overwritten."
+            ).format(len(target_paths))
+            if QMessageBox.warning(self, self.tr("Attention"), msg,
+                                   QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+                return
+
+        saved_paths: list[str] = []
+        failed_paths: list[str] = []
+
+        def _get_image_info(path: str) -> tuple[int, int, bool]:
+            if path == self._current_image_path and not self._current_image.isNull():
+                img = self._current_image
+            else:
+                img = self.get_qimage_from_mat(self._read_image_mat(path))
+            if img.isNull():
+                return 0, 0, False
+            return img.width(), img.height(), img.isGrayscale()
+
+        def work(idx: int):
+            target_path = target_paths[idx]
+            try:
+                self.viewmodel.save_shapes_to_path(target_path, selected_shapes, _get_image_info)
+                saved_paths.append(target_path)
+            except Exception:
+                logging.exception("Failed to save labels to %s", target_path)
+                failed_paths.append(target_path)
+
+        dlg = self._get_progress_list_dialog_class()(work, target_paths)
+        dlg.exec_()
+
+        for path in saved_paths:
+            self.viewmodel.mark_path_as_saved(
+                path, has_label=True, is_empty=(len(selected_shapes) == 0), needs_confirm=False
+            )
+        if self._current_image_path in saved_paths:
+            self._set_clean()
+        if failed_paths:
+            gui_util.get_message_box(
+                self, "Batch Save",
+                f"Saved {len(saved_paths)} image(s).\nFailed: {len(failed_paths)} image(s). "
+                "Check the log for details.",
+            )
+        self.status(f"Saved labels to {len(saved_paths)} image(s).", 3000)
 
     def saveFileDialog(self):
         caption = '%s - Choose File' % __appname__
@@ -1178,8 +1263,7 @@ class LabelerView(QMainWindow):
         return yes == QMessageBox.warning(self, u'Attention', msg, yes | no)
 
     def errorMessage(self, title, message):
-        return QMessageBox.critical(self, title,
-                                    '<p><b>%s</b></p>%s' % (title, message))
+        return QMessageBox.critical(self, title, '<p><b>%s</b></p>%s' % (title, message))
 
     def currentPath(self):
         return os.path.dirname(self._current_image_path) if self._current_image_path else '.'
@@ -1191,17 +1275,167 @@ class LabelerView(QMainWindow):
             for action in self.actions.on_shapes_present:
                 action.setEnabled(False)
 
-    def make_dataset_summary(self, dataset_summary_path, include_empty:bool):
-        return build_dataset_summary(self._image_paths, dataset_summary_path, include_empty)
+    def make_dataset_summary(self, dataset_summary_path, include_empty: bool):
+        return build_dataset_summary(self.viewmodel.get_image_paths(), dataset_summary_path, include_empty)
 
     def _toggle_keep_prev(self):
         self._is_keep_prev = not self._is_keep_prev
 
     def _delete_label_file(self):
-        self.viewmodel.delete_label_file()
+        selected_items = self._file_list_widget.selectedItems()
+        target_paths = [self.tr(item.text()) for item in selected_items]
+        if not target_paths and self._current_image_path is not None:
+            target_paths = [self._current_image_path]
+        if not target_paths:
+            return
+        mb = QMessageBox
+        if len(target_paths) == 1:
+            msg = self.tr(
+                "You are about to permanently delete label file of {}, \r\nproceed anyway?"
+            ).format(target_paths[0])
+        else:
+            msg = self.tr(
+                "You are about to permanently delete {} label files, \r\nproceed anyway?"
+            ).format(len(target_paths))
+        if mb.warning(self, self.tr("Attention"), msg, mb.Yes | mb.No) != mb.Yes:
+            return
+        self.viewmodel.delete_label_files(target_paths, self._current_image_path)
 
     def _remove_selected_images_from_list(self):
-        self.viewmodel.remove_selected_images_from_list()
+        selected_items = self._file_list_widget.selectedItems()
+        target_paths = [self.tr(item.text()) for item in selected_items]
+        if not target_paths:
+            return
+        mb = QMessageBox
+        if len(target_paths) == 1:
+            msg = self.tr(
+                "You are about to remove {} from the current project list.\r\n"
+                "The image file itself will not be deleted. Proceed anyway?"
+            ).format(target_paths[0])
+        else:
+            msg = self.tr(
+                "You are about to remove {} images from the current project list.\r\n"
+                "The image files themselves will not be deleted. Proceed anyway?"
+            ).format(len(target_paths))
+        if mb.warning(self, self.tr("Attention"), msg, mb.Yes | mb.No) != mb.Yes:
+            return
+        self.viewmodel.remove_images_from_list(target_paths, self._current_image_path)
+
+    def _select_all_files_in_list(self):
+        if self._file_list_widget.count() == 0:
+            return
+        self._file_list_widget.setFocus(Qt.ShortcutFocusReason)
+        self._file_list_widget.selectAll()
+        self.status(f"Selected {self._file_list_widget.count()} images.", 2000)
+
+    def _get_selected_paths(self) -> list:
+        """Return paths of selected items; falls back to current image if none selected."""
+        selected = [self.tr(item.text()) for item in self._file_list_widget.selectedItems()]
+        if not selected and self._current_image_path is not None:
+            selected = [self._current_image_path]
+        return list(dict.fromkeys(selected))
+
+    # ------------------------------------------------------------------
+    # View slots — respond to ViewModel signals
+    # ------------------------------------------------------------------
+
+    def _on_image_index_started(self, total: int) -> None:
+        if not self.isVisible():
+            self._image_index_progress = None
+            return
+        self._image_index_progress = QProgressDialog(
+            "Scanning image labels...", "Cancel", 0, total, self
+        )
+        self._image_index_progress.setWindowTitle("Indexing Images")
+        self._image_index_progress.setWindowModality(Qt.WindowModal)
+        self._image_index_progress.setMinimumDuration(0)
+        self._image_index_progress.setValue(0)
+        self._image_index_progress.canceled.connect(self.viewmodel.cancel_image_index)
+        self._image_index_progress.show()
+
+    def _on_image_index_progress(self, cur: int, total: int, path: str) -> None:
+        if self._image_index_progress is None:
+            return
+        try:
+            self._image_index_progress.setMaximum(max(total, 1))
+            self._image_index_progress.setLabelText(
+                f"Scanning image labels...\n{os.path.basename(path)}"
+            )
+            self._image_index_progress.setValue(cur)
+        except RuntimeError:
+            self._image_index_progress = None
+
+    def _on_image_index_completed(self, was_cancelled: bool) -> None:
+        if self._image_index_progress is not None:
+            self._image_index_progress.close()
+            self._image_index_progress.deleteLater()
+            self._image_index_progress = None
+
+    def _on_image_index_failed(self, message: str) -> None:
+        if self._image_index_progress is not None:
+            self._image_index_progress.close()
+            self._image_index_progress.deleteLater()
+            self._image_index_progress = None
+        gui_util.get_message_box(self, "Indexing Failed", "Failed to scan image labels.")
+
+    def _on_file_list_batch_ready(self, batch: list) -> None:
+        self._file_list_widget.setUpdatesEnabled(False)
+        for path, has_label, is_empty, needs_confirm in batch:
+            item = QListWidgetItem(path)
+            self._apply_file_item_style(item, has_label, is_empty, needs_confirm)
+            self._file_list_widget.addItem(item)
+        self._file_list_widget.setUpdatesEnabled(True)
+
+    def _on_file_list_item_state_changed(
+        self, path: str, has_label: bool, is_empty: bool, needs_confirm: bool
+    ) -> None:
+        for item in self._file_list_widget.findItems(path, Qt.MatchExactly):
+            self._apply_file_item_style(item, has_label, is_empty, needs_confirm)
+
+    def _on_file_list_items_removed(self, removed_paths: set) -> None:
+        for row in range(self._file_list_widget.count() - 1, -1, -1):
+            item = self._file_list_widget.item(row)
+            if self.tr(item.text()) in removed_paths:
+                self._file_list_widget.takeItem(row)
+
+    def _on_file_list_info_updated(self, total: int, labeled: int) -> None:
+        self._lbl_file_list_info.setText(f"Total: {total}, Labeled: {labeled}")
+
+    def _on_navigate_reset(self, next_path: str) -> None:
+        self.resetState()
+        self._set_clean()
+        self.canvas.setEnabled(False)
+        self._current_image_path = None
+        self._current_image = QImage()
+        if next_path:
+            self._load_file(next_path)
+        else:
+            self._main_window.setWindowTitle(__appname__)
+
+    def _on_label_files_deleted(self, deleted_paths: set, reload_path: str) -> None:
+        if reload_path:
+            self.resetState()
+            self._load_file(reload_path, is_load_after_delete=True)
+
+    @staticmethod
+    def _apply_file_item_style(
+        item: QListWidgetItem, has_label: bool, is_empty: bool, needs_confirm: bool
+    ) -> None:
+        """Apply color coding to a file list item based on label state."""
+        if not has_label:
+            foreground = QColor(235, 92, 92)
+            background = QColor(62, 24, 28)
+        elif is_empty:
+            foreground = QColor(160, 166, 176)
+            background = QColor(38, 42, 48)
+        elif needs_confirm:
+            foreground = QColor(255, 176, 245)
+            background = QColor(54, 34, 60)
+        else:
+            foreground = QColor(232, 236, 241)
+            background = QColor(30, 34, 38)
+        item.setForeground(foreground)
+        item.setBackground(background)
 
     def _auto_label(self):
         import torch
@@ -1239,10 +1473,7 @@ class LabelerView(QMainWindow):
             logging.error(error_msg)
             return
 
-        img_paths = []
-        for img_path, is_labeled in self._labeled_info_dict.items():
-            if not is_labeled:
-                img_paths.append(img_path)
+        img_paths = self.viewmodel.get_unlabeled_image_paths()
 
         def work(idx: int):
             try:
@@ -1291,37 +1522,14 @@ class LabelerView(QMainWindow):
             detector = None
 
         gui_util.get_message_box(self, "Auto Labeling", "Auto Labeling finished successfully.")
-        image_paths = self._get_labeler_image_list_from_file()
-        self._load_images(image_paths)
+        image_paths = self.viewmodel.get_labeler_image_list()
+        self.viewmodel.load_images(image_paths)
 
     def _item_selected_changed_file_list(self):
         indexes = self._file_list_widget.selectedIndexes()
         if len(indexes) > 0:
             item = self._file_list_widget.item(indexes[0].row())
             self._file_list_widget.scrollToItem(item)
-
-    def _refresh_lbl_file_list_info(self):
-        self.viewmodel.refresh_file_list_info()
-
-    def _get_selected_image_paths(self):
-        return self.viewmodel.get_selected_image_paths()
-
-    def _select_all_files_in_list(self):
-        self.viewmodel.select_all_files_in_list()
-
-    def _set_file_item_state(self, item: QListWidgetItem, image_path: str, has_label: bool, is_empty: bool = False,
-                             needs_confirm: bool = False):
-        self.viewmodel.set_file_item_state(item, image_path, has_label, is_empty, needs_confirm)
-
-    def _set_file_item_state_by_path(self, image_path: str, has_label: bool, is_empty: bool = False,
-                                     needs_confirm: bool = False):
-        self.viewmodel.set_file_item_state_by_path(image_path, has_label, is_empty, needs_confirm)
-
-    def _mark_path_as_saved(self, image_path: str, has_label: bool, is_empty: bool = False, needs_confirm: bool = False):
-        self.viewmodel.mark_path_as_saved(image_path, has_label, is_empty, needs_confirm)
-
-    def _save_shapes_to_image_path(self, image_path: str, shapes: List[Shape]):
-        self.viewmodel.save_shapes_to_image_path(image_path, shapes)
 
 
 class ElideLeftDelegate(QStyledItemDelegate):
