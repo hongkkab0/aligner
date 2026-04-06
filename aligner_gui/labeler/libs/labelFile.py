@@ -85,6 +85,52 @@ class LabelFile(object):
     def remove_label_file(self):
         io_util.remove_file(self._label_path)
 
+    def save_label_from_raw(self, raw_shapes: list, image_info: dict) -> None:
+        """Save labels from pre-serialized plain-Python shape dicts.
+
+        Each dict in *raw_shapes* must have keys:
+            x1, y1, x2, y2, x3, y3, x4, y4  (float)
+            label (str)
+            isRotated (bool)
+
+        This variant never touches any Qt object, so it is safe to call from
+        a background thread.
+        """
+        data_shapes = []
+        for d in raw_shapes:
+            data_shape = {
+                'x1': d['x1'], 'y1': d['y1'],
+                'x2': d['x2'], 'y2': d['y2'],
+                'x3': d['x3'], 'y3': d['y3'],
+                'x4': d['x4'], 'y4': d['y4'],
+            }
+            data_shape["label"] = d["label"]
+            data_shape["shape_type"] = (
+                SHAPE_TYPE_RO_RECTANGLE if d["isRotated"] else SHAPE_TYPE_RECTANGLE
+            )
+            data_shape["group_id"] = None
+            data_shape["flags"] = {}
+            data_shapes.append(data_shape)
+
+        data = {
+            "labeler": __appname__,
+            "label_format_version": self.LABEL_FORMAT_VERSION,
+            "task_type": self._task_type,
+            "shapes": data_shapes,
+            "imageHeight": image_info['height'],
+            "imageWidth": image_info['width'],
+            "imageDepth": image_info['depth'],
+            "need_confirm": False,
+            "split": self._split,
+        }
+        try:
+            with open(self._label_path, "w") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            self.labelPath = self._label_path
+            self._saved = True
+        except Exception as e:
+            raise LabelFileError(e)
+
     def save_label(self, image_info):
         def _format_shape(shape: Shape):
             return dict(label=shape.get_label(),
