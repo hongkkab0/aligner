@@ -220,12 +220,17 @@ class Worker:
 
 
     def start_train(self, callback_one_epoch_finished, callback_one_iter_finished, callback_status=None, resume=False):
+        # Create the stop hook FIRST — before any slow setup — so that if
+        # stop_training() is called from the main thread during setup, it will
+        # always set the quit flag on the hook that will actually be registered.
+        from aligner_engine.hooks.dice_stop_loop_hook import DICEStopLoopHook
+        self._stop_loop_hook = DICEStopLoopHook()
+
         import mmcv
         import torch
         from mmdet.utils import register_all_modules as register_all_modules_mmdet
         from mmrotate.utils import register_all_modules
         from mmengine.config import Config
-        from aligner_engine.hooks.dice_stop_loop_hook import DICEStopLoopHook
         from aligner_engine.hooks.dice_gui_callback_hook import DICECallbackHook
         from aligner_engine.mm_rotate_det.dice.dice_rotate_det_runner import DiceRotateDetRunner
 
@@ -407,7 +412,6 @@ class Worker:
 
         emit_status("Building training runner...")
         self._runner = DiceRotateDetRunner.from_cfg(cfg)
-        self._stop_loop_hook = DICEStopLoopHook()
         self._runner.register_hook(DICECallbackHook(worker=self,
                                                     iter_callback=callback_one_iter_finished,
                                                     epoch_callback=callback_one_epoch_finished))
@@ -422,9 +426,16 @@ class Worker:
         self._runner.train()
 
     def stop_training(self):
-        self._stop_loop_hook.quit()
+        # Only set the quit flag — this is the only thread-safe operation.
+        # Cleanup (logger, runner) must happen inside the training thread
+        # via cleanup_after_stop(), which is called from ThreadTrain.run()
+        # after the stop exception is caught.
+        if self._stop_loop_hook is not None:
+            self._stop_loop_hook.quit()
+
+    def cleanup_after_stop(self):
+        """Called from the training thread after the user-stop exception is caught."""
         self.close_logger()
-        del self._runner
         self._runner = None
 
     def success_training(self):

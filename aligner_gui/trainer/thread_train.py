@@ -55,9 +55,10 @@ class ThreadTrain(QThread):
                 TRAIN_LOGGER.error(error_msg)
                 self._error()
             else:
-                # User-initiated stop: must still emit the signal so the
-                # ViewModel can call _finalize_stop and reset the GUI.
+                # User-initiated stop: clean up in this thread (thread-safe),
+                # then emit the signal so ViewModel can reset the GUI.
                 TRAIN_LOGGER.info("Training stopped by user.")
+                self._worker.cleanup_after_stop()
                 self.qt_signal_stop_training.emit("Training stopped by user.")
 
 
