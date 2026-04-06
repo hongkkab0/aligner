@@ -138,11 +138,17 @@ class TesterPreviewRenderer:
     ]
 
     def _get_color(self, idx: int) -> tuple:
+        """Vivid color for Pred boxes."""
         return self._PALETTE[idx % len(self._PALETTE)]
 
-    # GT is always drawn in white dashed so it is unmistakably distinct from
-    # the per-class coloured Pred boxes regardless of which class is shown.
-    _GT_COLOR = QColor(255, 255, 255)
+    @staticmethod
+    def _pastel(r: int, g: int, b: int, factor: float = 0.55) -> tuple:
+        """Blend toward white — same hue as Pred but clearly lighter for GT."""
+        return (
+            int(r + (255 - r) * factor),
+            int(g + (255 - g) * factor),
+            int(b + (255 - b) * factor),
+        )
 
     def _draw_gt_overlay(self, painter: QPainter, img_path: str, class_index: dict, thickness: int, font_size: int):
         label = self._get_label_data(img_path)
@@ -151,12 +157,15 @@ class TesterPreviewRenderer:
 
         no_rotation = self._settings_provider().no_rotation
         painter.setFont(QFont("Arial", font_size))
-        gt_pen  = QPen(self._GT_COLOR, thickness, Qt.DashLine)
-        gt_fill = QColor(255, 255, 255, 20)
         for shape in label.get("shapes", []):
             class_name = shape.get("label", "")
             if class_name not in class_index:
                 continue
+            class_idx = class_index[class_name]
+            # Pastel version of class color → same hue as Pred, clearly lighter
+            r, g, b = self._pastel(*self._get_color(class_idx))
+            gt_pen  = QPen(QColor(r, g, b), thickness, Qt.DashLine)
+            gt_fill = QColor(r, g, b, 28)
             qbox = [
                 shape["x1"], shape["y1"],
                 shape["x2"], shape["y2"],

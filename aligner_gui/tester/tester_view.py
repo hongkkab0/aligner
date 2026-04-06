@@ -27,20 +27,22 @@ class _ClassLegendWidget(QWidget):
     _SWATCH_W = 14
     _SWATCH_H = 10
     _PAD      = 8
-    _GT_COLOR = QColor(255, 255, 255)   # GT = always white dashed
-
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._entries: list[tuple[str, QColor]] = []   # (class_name, pred_color)
-        self.setFixedWidth(150)
+        # (class_name, pred_QColor, gt_QColor)
+        self._entries: list[tuple[str, QColor, QColor]] = []
+        self.setFixedWidth(165)
         self.setMinimumHeight(60)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
 
     def update_classes(self, class_index: dict, palette: list) -> None:
-        self._entries = [
-            (name, QColor(*palette[idx % len(palette)]))
-            for name, idx in sorted(class_index.items(), key=lambda kv: kv[1])
-        ]
+        from aligner_gui.tester.preview_renderer import TesterPreviewRenderer
+        entries = []
+        for name, idx in sorted(class_index.items(), key=lambda kv: kv[1]):
+            vivid  = palette[idx % len(palette)]
+            pastel = TesterPreviewRenderer._pastel(*vivid)
+            entries.append((name, QColor(*vivid), QColor(*pastel)))
+        self._entries = entries
         self.update()
 
     def paintEvent(self, _event) -> None:
@@ -48,7 +50,10 @@ class _ClassLegendWidget(QWidget):
         W = self.width()
         p.fillRect(self.rect(), QColor(22, 26, 32))
 
-        y = self._PAD
+        y   = self._PAD
+        SH  = self._SWATCH_H
+        SW  = self._SWATCH_W
+        PAD = self._PAD
         font_bold = QFont("Arial", 9, QFont.Bold)
         font_norm = QFont("Arial", 8)
         fm = QFontMetrics(font_norm)
@@ -56,46 +61,50 @@ class _ClassLegendWidget(QWidget):
         # ── "Legend" header ────────────────────────────────────────────
         p.setFont(font_bold)
         p.setPen(QColor(190, 200, 215))
-        p.drawText(self._PAD, y + 11, "Legend")
+        p.drawText(PAD, y + 11, "Legend")
         y += 20
 
-        # ── GT row ─────────────────────────────────────────────────────
+        # ── Column headers: Pred | GT ───────────────────────────────────
+        # Two swatches per row: vivid solid (Pred) and pastel dashed (GT)
+        pred_x = PAD
+        gt_x   = PAD + SW + 3     # GT swatch starts right after Pred swatch
+        name_x = gt_x + SW + 5   # class name starts after both swatches
+
         p.setFont(font_norm)
-        sx = self._PAD
-        # dashed white line as swatch
-        p.setPen(QPen(self._GT_COLOR, 1.5, Qt.DashLine))
-        mid = y + self._SWATCH_H // 2
-        p.drawLine(sx, mid, sx + self._SWATCH_W, mid)
-        p.setPen(QColor(220, 220, 220))
-        p.drawText(sx + self._SWATCH_W + 5, y + self._SWATCH_H - 1, "GT  (all classes)")
+        p.setPen(QColor(150, 160, 175))
+        p.drawText(pred_x, y + SH - 1, "Pr")
+        p.drawText(gt_x,   y + SH - 1, "GT")
+        p.drawText(name_x, y + SH - 1, "Class")
         y += self._ROW_H
 
         # divider
-        y += 4
         p.setPen(QColor(50, 58, 70))
-        p.drawLine(self._PAD, y, W - self._PAD, y)
-        y += 6
-
-        # ── Pred header ─────────────────────────────────────────────────
-        p.setFont(font_bold)
-        p.setPen(QColor(190, 200, 215))
-        p.drawText(self._PAD, y + 11, "Pred")
-        y += 18
+        p.drawLine(PAD, y, W - PAD, y)
+        y += 4
 
         # ── one row per class ────────────────────────────────────────────
         p.setFont(font_norm)
-        for name, color in self._entries:
+        avail_w = W - name_x - 4
+        for name, pred_col, gt_col in self._entries:
             if y + self._ROW_H > self.height():
                 break
-            # solid swatch
+            mid = y + SH // 2
+
+            # Pred swatch: vivid solid rect
             p.setPen(Qt.NoPen)
-            p.setBrush(color)
-            p.drawRect(self._PAD, y, self._SWATCH_W, self._SWATCH_H)
-            # class name (elide if too long)
-            p.setPen(color)
-            avail_w = W - self._PAD - self._SWATCH_W - 5 - 2
+            p.setBrush(pred_col)
+            p.drawRect(pred_x, y, SW, SH)
+
+            # GT swatch: pastel dashed line (overlaid on lighter rect)
+            p.setBrush(QColor(gt_col.red(), gt_col.green(), gt_col.blue(), 60))
+            p.drawRect(gt_x, y, SW, SH)
+            p.setPen(QPen(gt_col, 1.5, Qt.DashLine))
+            p.drawLine(gt_x, mid, gt_x + SW, mid)
+
+            # Class name
+            p.setPen(pred_col)
             text = fm.elidedText(name, Qt.ElideRight, avail_w)
-            p.drawText(self._PAD + self._SWATCH_W + 5, y + self._SWATCH_H - 1, text)
+            p.drawText(name_x, y + SH - 1, text)
             y += self._ROW_H
 
         p.end()
