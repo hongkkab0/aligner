@@ -31,15 +31,16 @@ TRAIN_LOGGER = logging.getLogger("aligner.trainer")
 class _GpuMemBar(QWidget):
     """Vertical GPU-memory gauge with proportional fill and 25/50/75 % tick marks.
 
-    Replaces the narrow stock QProgressBar so the fill level is clearly
-    distinguishable at a glance: 29 % vs 50 % vs 75 % produce obviously
-    different fill heights, and colour changes to amber / red at high load.
+    The current percentage is drawn inside the bar (bottom area) so it never
+    overlaps with the external labels.  The 25/50/75 tick labels are drawn to
+    the right of the bar column only; they do not overlap with the fill value.
     """
 
-    _BAR_W   = 34                          # fill column width (px)
-    _TICK_H  = 120                         # total drawable height
-    _TICK_LEN = 5                          # horizontal tick length (right side)
-    _TICK_PAD = 3                          # gap between tick and label
+    _BAR_W    = 40                          # fill column width (px)
+    _TICK_H   = 140                         # total widget height
+    _VAL_H    = 20                          # reserved pixels at bottom for value text
+    _TICK_LEN = 5                           # horizontal tick length (right side)
+    _TICK_PAD = 3                           # gap between tick and label
 
     _COL_LOW    = QColor( 60, 170, 110)    # green  ≤ 70 %
     _COL_MID    = QColor(220, 155,  35)    # amber  70–90 %
@@ -47,14 +48,17 @@ class _GpuMemBar(QWidget):
     _COL_BG     = QColor( 28,  32,  38)
     _COL_BORDER = QColor( 64,  74,  86)
     _COL_TICK   = QColor( 85, 100, 115)
+    _COL_VAL    = QColor(220, 226, 232)    # value text colour
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._value = 0
-        # Reserve space for the tick labels ("75%", "50%", "25%")
-        fm = QFontMetrics(self._tick_font())
-        label_w = fm.boundingRect("100%").width() + 2
-        self.setFixedSize(self._BAR_W + self._TICK_LEN + self._TICK_PAD + label_w,
+        fm_tick  = QFontMetrics(self._tick_font())
+        fm_val   = QFontMetrics(self._val_font())
+        tick_label_w = fm_tick.boundingRect("100%").width() + 2
+        val_label_w  = fm_val.boundingRect("100%").width() + 4
+        bar_w = max(self._BAR_W, val_label_w)
+        self.setFixedSize(bar_w + self._TICK_LEN + self._TICK_PAD + tick_label_w,
                           self._TICK_H)
 
     def setValue(self, pct: int) -> None:
@@ -69,21 +73,31 @@ class _GpuMemBar(QWidget):
         f.setPointSize(7)
         return f
 
+    @staticmethod
+    def _val_font() -> QFont:
+        f = QFont()
+        f.setPointSize(9)
+        f.setBold(True)
+        return f
+
     def paintEvent(self, _event) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
 
-        W = self._BAR_W
-        H = self._TICK_H
-        PAD = 2          # inner vertical padding so the bar has a little room
+        W  = self._BAR_W
+        H  = self._TICK_H
+        VH = self._VAL_H   # bottom strip reserved for value text
+        PAD = 2            # inner vertical padding above value strip
 
-        # ── background ─────────────────────────────────────────────────
+        bar_h = H - VH     # height of the gauge column (above value strip)
+
+        # ── background (gauge column only) ─────────────────────────────
         p.setPen(QPen(self._COL_BORDER, 1))
         p.setBrush(self._COL_BG)
-        p.drawRoundedRect(QRect(0, 0, W - 1, H - 1), 4, 4)
+        p.drawRoundedRect(QRect(0, 0, W - 1, bar_h - 1), 4, 4)
 
-        # ── coloured fill (bottom → top) ────────────────────────────────
-        drawable_h = H - 2 * PAD
+        # ── coloured fill (bottom → top, within gauge column) ───────────
+        drawable_h = bar_h - 2 * PAD
         fill_h = round(drawable_h * self._value / 100)
         if fill_h > 0:
             v = self._value
@@ -93,37 +107,40 @@ class _GpuMemBar(QWidget):
             p.setPen(Qt.NoPen)
             p.setBrush(color)
             p.drawRoundedRect(
-                QRect(2, H - PAD - fill_h, W - 4, fill_h), 3, 3
+                QRect(2, bar_h - PAD - fill_h, W - 4, fill_h), 3, 3
             )
 
         # ── dashed guide lines + right-side ticks + labels ─────────────
         tick_font = self._tick_font()
         p.setFont(tick_font)
-        fm = QFontMetrics(tick_font)
-        text_h = fm.ascent()
+        fm_tick = QFontMetrics(tick_font)
+        text_h  = fm_tick.ascent()
 
-        dash_pen = QPen(self._COL_TICK, 1, Qt.DotLine)
+        dash_pen  = QPen(self._COL_TICK, 1, Qt.DotLine)
         solid_pen = QPen(self._COL_TICK, 1, Qt.SolidLine)
 
         for mark in (75, 50, 25):
-            # pixel y-coordinate for this mark (0 % = bottom, 100 % = top)
-            y = PAD + round((H - 2 * PAD) * (1 - mark / 100))
+            y = PAD + round(drawable_h * (1 - mark / 100))
 
-            # dashed horizontal guide across the bar face
             p.setPen(dash_pen)
             p.drawLine(1, y, W - 2, y)
 
-            # solid tick on the right edge
             p.setPen(solid_pen)
             p.drawLine(W, y, W + self._TICK_LEN, y)
 
-            # label text
             p.setPen(QPen(self._COL_TICK, 1))
-            p.drawText(
-                W + self._TICK_LEN + self._TICK_PAD,
-                y + text_h // 2,
-                f"{mark}%",
-            )
+            p.drawText(W + self._TICK_LEN + self._TICK_PAD,
+                       y + text_h // 2,
+                       f"{mark}%")
+
+        # ── current value — drawn BELOW the gauge column, never overlaps ─
+        val_font = self._val_font()
+        p.setFont(val_font)
+        fm_val = QFontMetrics(val_font)
+        val_text = f"{self._value}%"
+        val_rect = QRect(0, bar_h, W, VH)
+        p.setPen(QPen(self._COL_VAL, 1))
+        p.drawText(val_rect, Qt.AlignHCenter | Qt.AlignVCenter, val_text)
 
         p.end()
 
@@ -251,11 +268,6 @@ class TrainerView(QWidget, Ui_trainer_widget):
         self.progress_device_usage = _GpuMemBar()
         self.progress_device_usage.hide()
         layout.addWidget(self.progress_device_usage, alignment=Qt.AlignHCenter)
-
-        self.label_device_percent = QLabel("")
-        self.label_device_percent.setAlignment(Qt.AlignCenter)
-        self.label_device_percent.setStyleSheet("font-weight: 600; color: rgb(220, 226, 232);")
-        layout.addWidget(self.label_device_percent)
 
         self.label_runtime_info = QLabel("VRAM --/--")
         self.label_runtime_info.setAlignment(Qt.AlignCenter)
@@ -389,7 +401,6 @@ class TrainerView(QWidget, Ui_trainer_widget):
             self.label_time.setText("Preparing training...")
 
         self.label_device_title.setText("GPU Mem")
-        self.label_device_percent.setText("")
         self.label_runtime_info.setText("VRAM --/--")
 
         if is_resume and start_epoch > 0:
@@ -432,7 +443,6 @@ class TrainerView(QWidget, Ui_trainer_widget):
 
         self.progress_device_usage.hide()
         self.progress_device_usage.setValue(0)
-        self.label_device_percent.setText("")
         self.label_device_title.setText("GPU Mem")
         self.label_runtime_info.setText("VRAM --/--")
 
@@ -480,13 +490,11 @@ class TrainerView(QWidget, Ui_trainer_widget):
         if not info.get("visible", False):
             self.progress_device_usage.hide()
             self.label_device_title.setText(info.get("title", "CPU"))
-            self.label_device_percent.setText("")
             self.label_runtime_info.setText(info.get("info", ""))
             return
         self.progress_device_usage.show()
         self.progress_device_usage.setValue(info.get("value", 0))
         self.label_device_title.setText(info.get("title", "GPU Mem"))
-        self.label_device_percent.setText(info.get("percent", ""))
         self.label_runtime_info.setText(info.get("info", ""))
         self.label_runtime_info.setToolTip(info.get("tooltip", ""))
 

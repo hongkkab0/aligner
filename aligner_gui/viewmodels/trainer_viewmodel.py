@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import sys
 import time
 import traceback
 from typing import TYPE_CHECKING, Callable, Optional, TypedDict
@@ -108,6 +110,12 @@ class TrainerViewModel(ViewModelBase):
 
         self._current_epoch_for_eta = 1
         self._last_iter_ui_update_ts = 0.0
+
+        # Log startup environment paths for diagnostics
+        TRAIN_LOGGER.info("=== DICE Aligner startup ===")
+        TRAIN_LOGGER.info("Python: %s", sys.executable)
+        for _key in ("dice_aligner_path", "dice_aligner_embed_python_path", "dice_aligner_python_path"):
+            TRAIN_LOGGER.info("ENV %s = %s", _key, os.environ.get(_key, "(not set)"))
 
     # ------------------------------------------------------------------
     # Read-only properties
