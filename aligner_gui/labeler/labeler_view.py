@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import codecs
 import os.path
+import re
 import subprocess
 import time
 from functools import partial
@@ -143,7 +144,7 @@ class LabelerView(QMainWindow):
         self.dock.setObjectName(u'Label')
         self.dock.setWidget(labelListContainer)
 
-        self._file_list_widget = QListWidget()
+        self._file_list_widget = _FileListWidget()
         self._file_list_widget.setUniformItemSizes(True)
         self._file_list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._file_list_widget.setItemDelegate(ElideLeftDelegate())
@@ -1013,7 +1014,7 @@ class LabelerView(QMainWindow):
             image_paths = self.viewmodel.get_image_paths()
             index = image_paths.index(unicodeFilePath)
             fileWidgetItem = self._file_list_widget.item(index)
-            fileWidgetItem.setSelected(True)
+            self._file_list_widget.setCurrentItem(fileWidgetItem)
 
         if unicodeFilePath and os.path.exists(unicodeFilePath):
 
@@ -1122,7 +1123,7 @@ class LabelerView(QMainWindow):
                     relatviePath = os.path.join(root, file)
                     path = ustr(os.path.abspath(relatviePath))
                     images.append(path)
-        images.sort(key=lambda x: x.lower())
+        images.sort(key=lambda x: [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', x)])
         return images
 
     # ------------------------------------------------------------------
@@ -1390,6 +1391,7 @@ class LabelerView(QMainWindow):
         self._file_list_widget.setUpdatesEnabled(False)
         for path, has_label, is_empty, needs_confirm in batch:
             item = QListWidgetItem(path)
+            item.setToolTip(path)
             self._apply_file_item_style(item, has_label, is_empty, needs_confirm)
             self._file_list_widget.addItem(item)
         self._file_list_widget.setUpdatesEnabled(True)
@@ -1547,6 +1549,37 @@ class LabelerView(QMainWindow):
                 self._load_file(target_path)
 
 
+class _FileListWidget(QListWidget):
+    """QListWidget that navigates with plain arrow keys without extending the selection."""
+
+    _NAV_KEYS = {Qt.Key_Up, Qt.Key_Down, Qt.Key_Home, Qt.Key_End, Qt.Key_PageUp, Qt.Key_PageDown}
+
+    def keyPressEvent(self, event):
+        if event.key() in self._NAV_KEYS and event.modifiers() == Qt.NoModifier:
+            current = self.currentRow()
+            count = self.count()
+            if count == 0:
+                return
+            key = event.key()
+            if key == Qt.Key_Up:
+                new_row = max(0, current - 1)
+            elif key == Qt.Key_Down:
+                new_row = min(count - 1, current + 1)
+            elif key == Qt.Key_Home:
+                new_row = 0
+            elif key == Qt.Key_End:
+                new_row = count - 1
+            elif key == Qt.Key_PageUp:
+                visible = max(1, self.height() // max(1, self.sizeHintForRow(0)))
+                new_row = max(0, current - visible)
+            else:  # PageDown
+                visible = max(1, self.height() // max(1, self.sizeHintForRow(0)))
+                new_row = min(count - 1, current + visible)
+            self.setCurrentRow(new_row)
+        else:
+            super().keyPressEvent(event)
+
+
 class ElideLeftDelegate(QStyledItemDelegate):
     def __init__(self):
         super().__init__()
@@ -1554,8 +1587,10 @@ class ElideLeftDelegate(QStyledItemDelegate):
     def paint(self, painter, option, index):
         painter.save()
         value = index.data(Qt.DisplayRole)
+        # Show only the filename; full path remains in item.text() for navigation
+        display_text = os.path.basename(str(value)) if value else ''
         textcolor = index.model().data(index, Qt.TextColorRole)
-        pen = QPen(option.palette.text().color() if textcolor == None else textcolor.color())
+        pen = QPen(option.palette.text().color() if textcolor is None else textcolor.color())
         painter.setPen(pen)
         if int(option.state & QStyle.State_Selected) > 0:
             painter.fillRect(option.rect, QColor(20, 100, 160))
@@ -1564,8 +1599,7 @@ class ElideLeftDelegate(QStyledItemDelegate):
             if backgroundColor:
                 painter.fillRect(option.rect, backgroundColor.color())
         painter.drawText(option.rect, Qt.AlignLeft | Qt.AlignVCenter,
-                         option.fontMetrics.elidedText(str(value), Qt.ElideLeft,
+                         option.fontMetrics.elidedText(display_text, Qt.ElideRight,
                                                        option.rect.width()))
-
         painter.restore()
 
