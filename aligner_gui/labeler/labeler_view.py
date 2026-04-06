@@ -1239,8 +1239,20 @@ class LabelerView(QMainWindow):
         if not selected_paths:
             return
 
-        # Serialize current image's shapes and add to cache if dirty
-        if self._dirty and self._current_image_path and not self._current_image.isNull():
+        # Current image is always eligible — the user pressed Save (Selected) while viewing it.
+        # Other selected images are only saved if the user actually navigated to them and changed
+        # something (tracked in _modified_paths).
+        paths_to_save: set[str] = set()
+        if self._current_image_path and self._current_image_path in selected_paths:
+            paths_to_save.add(self._current_image_path)
+        paths_to_save |= selected_paths & self._modified_paths
+
+        if not paths_to_save:
+            self.status("No modified images in selection — nothing to save.", 3000)
+            return
+
+        # Serialize current canvas shapes into the cache right now (main thread, before any bg work)
+        if self._current_image_path in paths_to_save and not self._current_image.isNull():
             _cur_raw: list = []
             for _s in self.canvas.get_shape():
                 if len(_s.points) >= 4:
@@ -1254,15 +1266,11 @@ class LabelerView(QMainWindow):
                     })
             self._pending_save_cache[self._current_image_path] = _cur_raw
 
-        # Only save images that have actually been modified
-        target_paths = list(selected_paths & self._modified_paths)
-        if not target_paths:
-            self.status("No modified images in selection — nothing to save.", 3000)
-            return
+        target_paths = list(paths_to_save)
 
         if len(target_paths) > 1:
             msg = self.tr(
-                "Save modified labels to {} image(s)?\r\n"
+                "Save labels to {} image(s)?\r\n"
                 "Only images you have actually changed will be written."
             ).format(len(target_paths))
             if QMessageBox.warning(self, self.tr("Attention"), msg,
@@ -1288,7 +1296,6 @@ class LabelerView(QMainWindow):
         def _get_image_info(path: str) -> tuple:
             return _image_info_cache.get(path, (0, 0, False))
 
-        # Snapshot shape counts now (cache may be mutated before callbacks run)
         _shape_counts = {p: len(self._pending_save_cache.get(p, [])) for p in target_paths}
 
         saved_paths: list[str] = []
@@ -1320,8 +1327,6 @@ class LabelerView(QMainWindow):
                 needs_confirm=False,
             )
         if self._current_image_path in saved_paths:
-            # mark_path_as_saved already removed from _modified_paths above;
-            # just clear the dirty flag and stop the autosave timer
             self._dirty = False
             self._autosave_timer.stop()
         if failed_paths:
