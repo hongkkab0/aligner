@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import *
 import json
 from typing import List
 
+
 import aligner_gui.labeler.resources
 # Add internal libs
 from aligner_gui.labeler.libs.label_manager import LabelManager
