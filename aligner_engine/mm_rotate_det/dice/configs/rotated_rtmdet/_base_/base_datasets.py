@@ -30,7 +30,7 @@ train_dataloader = dict(
             # ── Stage 2: Scale jitter + crop ────────────────────────────────
             # Randomly resize to 0.5–2.0× of the target, then crop to target.
             # Exposes the model to objects at varying absolute pixel sizes.
-            dict(type='mmdet.RandomResize',
+            dict(type='DiceRandomResize',
                  scale=[(256, 256), (1024, 1024)],
                  keep_ratio=True),
             # Pad to at least target size (needed when RandomResize < target).

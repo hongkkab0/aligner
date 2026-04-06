@@ -353,7 +353,7 @@ class Worker:
             elif transform.type == "mmdet.CachedMosaic":
                 # Each sub-image is resized to rescale_size; mosaic output is ~2×
                 transform.img_scale = rescale_size
-            elif transform.type == "mmdet.RandomResize":
+            elif transform.type == "DiceRandomResize":
                 transform.scale = [
                     (jitter_min, jitter_min),
                     (jitter_max, jitter_max),
