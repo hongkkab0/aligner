@@ -75,12 +75,12 @@ class DiceRandomShift(BaseTransform):
             top_bound = max(0, top_of_all_boxes - margin_y)
             bot_bound = max(0, img_height - bot_of_all_boxes - margin_y)
 
-            if right_bound - left_bound >= 1:
+            if left_bound + right_bound > 0:
                 random_shift_x = random.randint(-left_bound, right_bound)
             else:
                 random_shift_x = 0
 
-            if bot_bound - top_bound >= 1:
+            if top_bound + bot_bound > 0:
                 random_shift_y = random.randint(-top_bound, bot_bound)
             else:
                 random_shift_y = 0

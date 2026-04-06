@@ -332,6 +332,11 @@ class Worker:
         valid_pipeline = deepcopy(cfg.val_dataloader.dataset.pipeline)
 
         rescale_size = (settings.resize, settings.resize)
+        # Scale-jitter range: [0.5×, 2.0×] of the target resolution.
+        # Clamped so tiny/huge values don't cause OOM or degenerate crops.
+        jitter_min = max(64,   settings.resize // 2)
+        jitter_max = min(2048, settings.resize  * 2)
+
         random_flip_directions = []
         if settings.aug_flip_horizontal_use:
             random_flip_directions.append("horizontal")
@@ -342,12 +347,24 @@ class Worker:
         random_flip_tranform_idx = -1
         for idx, transform in enumerate(train_pipeline):
             if transform.type == "mmdet.Resize":
+                # Legacy single-resize (kept for backward compat with old cfgs)
                 transform.scale = rescale_size
+            elif transform.type == "mmdet.CachedMosaic":
+                # Each sub-image is resized to rescale_size; mosaic output is ~2×
+                transform.img_scale = rescale_size
+            elif transform.type == "mmdet.RandomResize":
+                transform.scale = [
+                    (jitter_min, jitter_min),
+                    (jitter_max, jitter_max),
+                ]
+            elif transform.type == "mmdet.Pad":
+                # Pads to at least rescale_size (pre-crop); exact size after crop
+                transform.size = rescale_size
+            elif transform.type == "mmdet.RandomCrop":
+                transform.crop_size = rescale_size
             elif transform.type == "mmdet.RandomFlip":
                 transform.direction = random_flip_directions
                 random_flip_tranform_idx = idx
-            elif transform.type == "mmdet.Pad":
-                transform.size = rescale_size
             elif transform.type == "mmdet.PackDetInputs":
                 if len(random_flip_directions) == 0:
                     transform.meta_keys = (
