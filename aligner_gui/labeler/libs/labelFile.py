@@ -70,7 +70,7 @@ class LabelFile(object):
                     np.array([[data_shape['x1'], data_shape['y1']],
                               [data_shape['x2'], data_shape['y2']],
                               [data_shape['x3'], data_shape['y3']],
-                              [data_shape['x4'], data_shape['y4']]], dtype=np.int32))
+                              [data_shape['x4'], data_shape['y4']]], dtype=np.float32))
                 if angle == 90:
                     angle = 0
                 angle = angle * math.pi / 180
