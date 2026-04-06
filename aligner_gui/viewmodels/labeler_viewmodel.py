@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 from PyQt5.QtCore import QTimer, pyqtSignal
 
@@ -315,38 +315,6 @@ class LabelerViewModel(ViewModelBase):
             is_empty=(len(current_shapes) == 0),
             needs_confirm=False,
         )
-
-    def save_raw_shapes_to_path(
-        self,
-        image_path: str,
-        raw_shapes: list,
-        get_image_info_fn: Callable[[str], tuple[int, int, bool]],
-    ) -> None:
-        """Save pre-serialized shape data to the label file for *image_path*.
-
-        *raw_shapes* is a list of plain-Python dicts (no Qt objects) produced
-        on the main thread.  This method is safe to call from a background
-        thread because it never touches any Qt value type.
-
-        Parameters
-        ----------
-        raw_shapes:
-            Each dict has keys: x1 y1 x2 y2 x3 y3 x4 y4 (float),
-            label (str), isRotated (bool).
-        get_image_info_fn:
-            Callable ``(path) → (width, height, is_grayscale)``.
-        """
-        label_file_class = self._get_label_file_class()
-        label_file = label_file_class(image_path)
-        width, height, is_grayscale = get_image_info_fn(image_path)
-        if width == 0 or height == 0:
-            raise RuntimeError(f"Failed to read image: {image_path}")
-        label_file.save_label_from_raw(raw_shapes, image_info={
-            "height": height,
-            "width": width,
-            "depth": 1 if is_grayscale else 3,
-            "isNeedConfirm": False,
-        })
 
     def mark_path_as_saved(
         self,
