@@ -261,7 +261,7 @@ class TrainerView(QWidget, Ui_trainer_widget):
         layout.setSpacing(6)
         layout.setAlignment(Qt.AlignTop)
 
-        self.label_device_title = QLabel("GPU Mem")
+        self.label_device_title = QLabel("VRAM 현황")
         self.label_device_title.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.label_device_title)
 
@@ -400,7 +400,7 @@ class TrainerView(QWidget, Ui_trainer_widget):
         else:
             self.label_time.setText("Preparing training...")
 
-        self.label_device_title.setText("GPU Mem")
+        self.label_device_title.setText("VRAM 현황")
         self.label_runtime_info.setText("VRAM --/--")
 
         if is_resume and start_epoch > 0:
@@ -443,7 +443,7 @@ class TrainerView(QWidget, Ui_trainer_widget):
 
         self.progress_device_usage.hide()
         self.progress_device_usage.setValue(0)
-        self.label_device_title.setText("GPU Mem")
+        self.label_device_title.setText("VRAM 현황")
         self.label_runtime_info.setText("VRAM --/--")
 
     def _on_epoch_updated(self, epoch: int, _ckpt_path: str) -> None:
@@ -494,7 +494,7 @@ class TrainerView(QWidget, Ui_trainer_widget):
             return
         self.progress_device_usage.show()
         self.progress_device_usage.setValue(info.get("value", 0))
-        self.label_device_title.setText(info.get("title", "GPU Mem"))
+        self.label_device_title.setText(info.get("title", "VRAM 현황"))
         self.label_runtime_info.setText(info.get("info", ""))
         self.label_runtime_info.setToolTip(info.get("tooltip", ""))
 
