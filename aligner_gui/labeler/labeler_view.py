@@ -1209,14 +1209,26 @@ class LabelerView(QMainWindow):
         saved_paths: list[str] = []
         failed_paths: list[str] = []
 
-        def _get_image_info(path: str) -> tuple[int, int, bool]:
-            if path == self._current_image_path and not self._current_image.isNull():
-                img = self._current_image
+        # Pre-compute image dimensions on the main thread before the background
+        # thread starts. Creating / reading QImage objects from a background
+        # thread is not safe on Windows and causes silent failures.
+        _image_info_cache: dict = {}
+        for _p in target_paths:
+            if _p == self._current_image_path and not self._current_image.isNull():
+                _image_info_cache[_p] = (
+                    self._current_image.width(),
+                    self._current_image.height(),
+                    self._current_image.isGrayscale(),
+                )
             else:
-                img = self.get_qimage_from_mat(self._read_image_mat(path))
-            if img.isNull():
-                return 0, 0, False
-            return img.width(), img.height(), img.isGrayscale()
+                _img = self.get_qimage_from_mat(self._read_image_mat(_p))
+                _image_info_cache[_p] = (
+                    (_img.width(), _img.height(), _img.isGrayscale())
+                    if not _img.isNull() else (0, 0, False)
+                )
+
+        def _get_image_info(path: str) -> tuple[int, int, bool]:
+            return _image_info_cache.get(path, (0, 0, False))
 
         def work(idx: int):
             target_path = target_paths[idx]
