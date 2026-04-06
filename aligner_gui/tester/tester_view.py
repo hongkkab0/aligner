@@ -301,8 +301,9 @@ class TesterView(QWidget, Ui_tester_widget):
         self._last_preview_key = preview_key
 
     def _change_selected_image_table_detail(self, img_path):
+        old_key = self._last_preview_key
         preview_key = ("detail", img_path, self.check_show_gt.isChecked(), self.check_show_prediction.isChecked())
-        if self._last_preview_key == preview_key:
+        if old_key == preview_key:
             return
         qpixmap = self._preview_renderer.render_detail_preview(
             img_path,
@@ -313,7 +314,13 @@ class TesterView(QWidget, Ui_tester_widget):
         )
         if qpixmap is None:
             return
-        self.image_panel.setImage(qpixmap)
+        # Preserve zoom/pan when only the GT/Pred overlay changed for the same image
+        same_image = (
+            isinstance(old_key, tuple)
+            and old_key[0] == "detail"
+            and old_key[1] == img_path
+        )
+        self.image_panel.setImage(qpixmap, preserve_zoom=same_image)
         self._last_preview_key = preview_key
 
     @pyqtSlot(int, int)
