@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import random as _random
 
+import numpy as np
 from mmcv.transforms import BaseTransform
 from mmrotate.registry import TRANSFORMS
 
@@ -49,10 +50,23 @@ class DiceRandomResize(BaseTransform):
         h = _random.randint(min_s[0], max_s[0])
         w = _random.randint(min_s[1], max_s[1])
 
+        h_before, w_before = results['img'].shape[:2]
+
         # mmdet.Resize overrides _resize_bboxes to use bboxes.rescale_()
         # which works correctly with RotatedBoxes.
         from mmdet.datasets.transforms import Resize as MmdetResize
-        return MmdetResize(scale=(h, w), keep_ratio=self.keep_ratio)(results)
+        results = MmdetResize(scale=(h, w), keep_ratio=self.keep_ratio)(results)
+
+        # PackDetInputs always checks for scale_factor in results.
+        # mmdet.Resize may not write it when called after CachedMosaic
+        # (which restructures the data dict). Set it explicitly so
+        # downstream transforms and formatters can always rely on it.
+        h_after, w_after = results['img'].shape[:2]
+        results['scale_factor'] = np.array(
+            [w_after / w_before, h_after / h_before], dtype=np.float32
+        )
+
+        return results
 
     def __repr__(self) -> str:
         return (
