@@ -509,6 +509,11 @@ class LabelerView(QMainWindow):
             self.viewmodel.save_labeler_image_list([])
 
         image_paths = self.viewmodel.get_labeler_image_list()
+        image_paths.sort(
+            key=lambda x: [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', x)]
+        )
+        if image_paths:
+            self.viewmodel.save_labeler_image_list(image_paths)
         self.viewmodel.load_images(image_paths)
 
     @staticmethod
@@ -1587,8 +1592,6 @@ class ElideLeftDelegate(QStyledItemDelegate):
     def paint(self, painter, option, index):
         painter.save()
         value = index.data(Qt.DisplayRole)
-        # Show only the filename; full path remains in item.text() for navigation
-        display_text = os.path.basename(str(value)) if value else ''
         textcolor = index.model().data(index, Qt.TextColorRole)
         pen = QPen(option.palette.text().color() if textcolor is None else textcolor.color())
         painter.setPen(pen)
@@ -1599,7 +1602,8 @@ class ElideLeftDelegate(QStyledItemDelegate):
             if backgroundColor:
                 painter.fillRect(option.rect, backgroundColor.color())
         painter.drawText(option.rect, Qt.AlignLeft | Qt.AlignVCenter,
-                         option.fontMetrics.elidedText(display_text, Qt.ElideRight,
+                         option.fontMetrics.elidedText(str(value) if value else '',
+                                                       Qt.ElideLeft,
                                                        option.rect.width()))
         painter.restore()
 
