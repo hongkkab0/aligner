@@ -27,7 +27,7 @@ class DeviceUsageInfo(TypedDict):
     """Payload emitted by :attr:`TrainerViewModel.device_usage_updated`.
 
     visible  : Whether a GPU is available; False means CPU-only mode.
-    title    : Label for the device panel header (e.g. "GPU Mem" or "CPU").
+    title    : Label for the device panel header (e.g. "VRAM 현황" or "CPU").
     percent  : Human-readable percentage string (e.g. "72%"), empty when invisible.
     value    : Integer 0-100 for the progress bar; 0 when invisible.
     info     : Detailed memory string shown in the panel body.
@@ -341,7 +341,7 @@ class TrainerViewModel(ViewModelBase):
         pct = max(0.0, min(snapshot.memory_percent, 100.0))
         self.device_usage_updated.emit({
             "visible": True,
-            "title": "GPU Mem",
+            "title": "VRAM 현황",
             "percent": f"{pct:.0f}%",
             "value": int(round(pct)),
             "info": f"{snapshot.memory_used_mb / 1024:.1f}/{snapshot.memory_total_mb / 1024:.1f} GB ({pct:.0f}%)",
@@ -373,7 +373,7 @@ class TrainerViewModel(ViewModelBase):
         pct = used * 100.0 / total
         self.device_usage_updated.emit({
             "visible": True,
-            "title": "GPU Mem",
+            "title": "VRAM 현황",
             "percent": f"{pct:.0f}%",
             "value": int(round(max(0, min(pct, 100)))),
             "info": f"{used / (1024**3):.1f}/{total / (1024**3):.1f} GB ({pct:.0f}%)",
