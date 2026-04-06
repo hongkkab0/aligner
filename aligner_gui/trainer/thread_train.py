@@ -36,8 +36,10 @@ class ThreadTrain(QThread):
     def terminate(self):
         TRAIN_LOGGER.info("thread is terminated")
         self._worker.stop_training()
-        self.wait(msecs=15000)
-        super().terminate()
+        # Do NOT call wait() here — that blocks the main thread (GUI freeze).
+        # _worker.stop_training() sets the quit flag; the training loop will
+        # raise the interrupt exception at its next checkpoint, run() will
+        # catch it and emit qt_signal_stop_training to finalize the GUI.
 
     def run(self):
         try:
@@ -52,6 +54,11 @@ class ThreadTrain(QThread):
                 error_msg = "ERROR - " + str(e)
                 TRAIN_LOGGER.error(error_msg)
                 self._error()
+            else:
+                # User-initiated stop: must still emit the signal so the
+                # ViewModel can call _finalize_stop and reset the GUI.
+                TRAIN_LOGGER.info("Training stopped by user.")
+                self.qt_signal_stop_training.emit("Training stopped by user.")
 
 
     def callback_one_iter_finished(self, phase_type: str, iter_idx: int, iter_len: int):
