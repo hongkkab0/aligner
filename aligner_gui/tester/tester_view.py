@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from PyQt5.QtWidgets import *
 from PyQt5.QtCore import *
-from PyQt5.QtGui import QColor, QMovie, QPen, QPainter, QFont, QCursor, QGuiApplication
+from PyQt5.QtGui import QColor, QMovie, QPen, QPainter, QFont, QFontMetrics, QCursor, QGuiApplication
 from PyQt5 import QtGui
 import subprocess
 
@@ -18,6 +18,87 @@ import json
 from copy import deepcopy
 import os
 from datetime import datetime
+
+
+class _ClassLegendWidget(QWidget):
+    """Sidebar panel showing GT / Pred color legend per class."""
+
+    _ROW_H    = 20
+    _SWATCH_W = 14
+    _SWATCH_H = 10
+    _PAD      = 8
+    _GT_COLOR = QColor(255, 255, 255)   # GT = always white dashed
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._entries: list[tuple[str, QColor]] = []   # (class_name, pred_color)
+        self.setFixedWidth(150)
+        self.setMinimumHeight(60)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+
+    def update_classes(self, class_index: dict, palette: list) -> None:
+        self._entries = [
+            (name, QColor(*palette[idx % len(palette)]))
+            for name, idx in sorted(class_index.items(), key=lambda kv: kv[1])
+        ]
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        p = QPainter(self)
+        W = self.width()
+        p.fillRect(self.rect(), QColor(22, 26, 32))
+
+        y = self._PAD
+        font_bold = QFont("Arial", 9, QFont.Bold)
+        font_norm = QFont("Arial", 8)
+        fm = QFontMetrics(font_norm)
+
+        # ── "Legend" header ────────────────────────────────────────────
+        p.setFont(font_bold)
+        p.setPen(QColor(190, 200, 215))
+        p.drawText(self._PAD, y + 11, "Legend")
+        y += 20
+
+        # ── GT row ─────────────────────────────────────────────────────
+        p.setFont(font_norm)
+        sx = self._PAD
+        # dashed white line as swatch
+        p.setPen(QPen(self._GT_COLOR, 1.5, Qt.DashLine))
+        mid = y + self._SWATCH_H // 2
+        p.drawLine(sx, mid, sx + self._SWATCH_W, mid)
+        p.setPen(QColor(220, 220, 220))
+        p.drawText(sx + self._SWATCH_W + 5, y + self._SWATCH_H - 1, "GT  (all classes)")
+        y += self._ROW_H
+
+        # divider
+        y += 4
+        p.setPen(QColor(50, 58, 70))
+        p.drawLine(self._PAD, y, W - self._PAD, y)
+        y += 6
+
+        # ── Pred header ─────────────────────────────────────────────────
+        p.setFont(font_bold)
+        p.setPen(QColor(190, 200, 215))
+        p.drawText(self._PAD, y + 11, "Pred")
+        y += 18
+
+        # ── one row per class ────────────────────────────────────────────
+        p.setFont(font_norm)
+        for name, color in self._entries:
+            if y + self._ROW_H > self.height():
+                break
+            # solid swatch
+            p.setPen(Qt.NoPen)
+            p.setBrush(color)
+            p.drawRect(self._PAD, y, self._SWATCH_W, self._SWATCH_H)
+            # class name (elide if too long)
+            p.setPen(color)
+            avail_w = W - self._PAD - self._SWATCH_W - 5 - 2
+            text = fm.elidedText(name, Qt.ElideRight, avail_w)
+            p.drawText(self._PAD + self._SWATCH_W + 5, y + self._SWATCH_H - 1, text)
+            y += self._ROW_H
+
+        p.end()
 from aligner_gui.shared import io_util
 import numpy as np
 
@@ -71,11 +152,18 @@ class TesterView(QWidget, Ui_tester_widget):
         self._busy_indicator.start()
         self.lbl_test_indicator.hide()
 
-        # image panel
+        # image panel + legend sidebar
         self.image_panel = ImagePanel(self)
         self.image_panel.setROIMode(False)
         self.image_panel.setSizePolicy(QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding))
-        self.layout_test_image_viewer.addWidget(self.image_panel)
+        self._legend_widget = _ClassLegendWidget(self)
+        _image_row = QWidget()
+        _image_row_layout = QHBoxLayout(_image_row)
+        _image_row_layout.setContentsMargins(0, 0, 0, 0)
+        _image_row_layout.setSpacing(4)
+        _image_row_layout.addWidget(self.image_panel)
+        _image_row_layout.addWidget(self._legend_widget)
+        self.layout_test_image_viewer.addWidget(_image_row)
         self.splitter_result.setStretchFactor(1, 1)
         self.check_show_gt = QCheckBox("GT")
         self.check_show_gt.setChecked(True)
@@ -486,6 +574,7 @@ class TesterView(QWidget, Ui_tester_widget):
         self._classes = [c["name"] for c in self._dataset_summary["class_summary"]["classes"]]
         self._class_index = {v: idx for idx, v in enumerate(self._classes)}
         self._class_name = {idx: v for idx, v in enumerate(self._classes)}
+        self._legend_widget.update_classes(self._class_index, TesterPreviewRenderer._PALETTE)
         self.viewmodel.reset_file_list([data["img_path"] for data in self._dataset_summary["data_summary"]])
         self._clear_preview_cache()
         self._refresh_table_file_list()

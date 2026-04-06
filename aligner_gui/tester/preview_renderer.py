@@ -92,8 +92,7 @@ class TesterPreviewRenderer:
                     thickness,
                     font_size,
                 )
-            if show_gt or show_prediction:
-                self._draw_legend(painter, class_index, image.shape[1], image.shape[0], font_size)
+            # Legend is rendered in the sidebar widget, not on the image
         finally:
             painter.end()
 
@@ -141,6 +140,10 @@ class TesterPreviewRenderer:
     def _get_color(self, idx: int) -> tuple:
         return self._PALETTE[idx % len(self._PALETTE)]
 
+    # GT is always drawn in white dashed so it is unmistakably distinct from
+    # the per-class coloured Pred boxes regardless of which class is shown.
+    _GT_COLOR = QColor(255, 255, 255)
+
     def _draw_gt_overlay(self, painter: QPainter, img_path: str, class_index: dict, thickness: int, font_size: int):
         label = self._get_label_data(img_path)
         if label is None:
@@ -148,14 +151,12 @@ class TesterPreviewRenderer:
 
         no_rotation = self._settings_provider().no_rotation
         painter.setFont(QFont("Arial", font_size))
+        gt_pen  = QPen(self._GT_COLOR, thickness, Qt.DashLine)
+        gt_fill = QColor(255, 255, 255, 20)
         for shape in label.get("shapes", []):
             class_name = shape.get("label", "")
             if class_name not in class_index:
                 continue
-            class_idx = class_index[class_name]
-            r, g, b = self._get_color(class_idx)
-            gt_pen  = QPen(QColor(r, g, b), thickness, Qt.DashLine)
-            gt_fill = QColor(r, g, b, 24)
             qbox = [
                 shape["x1"], shape["y1"],
                 shape["x2"], shape["y2"],
