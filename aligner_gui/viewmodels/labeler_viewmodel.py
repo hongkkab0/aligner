@@ -316,32 +316,32 @@ class LabelerViewModel(ViewModelBase):
             needs_confirm=False,
         )
 
-    def save_shapes_to_path(
+    def save_raw_shapes_to_path(
         self,
         image_path: str,
-        shapes,
+        raw_shapes: list,
         get_image_info_fn: Callable[[str], tuple[int, int, bool]],
     ) -> None:
-        """Command: save a copy of shapes to an arbitrary image path.
+        """Save pre-serialized shape data to the label file for *image_path*.
+
+        *raw_shapes* is a list of plain-Python dicts (no Qt objects) produced
+        on the main thread.  This method is safe to call from a background
+        thread because it never touches any Qt value type.
 
         Parameters
         ----------
+        raw_shapes:
+            Each dict has keys: x1 y1 x2 y2 x3 y3 x4 y4 (float),
+            label (str), isRotated (bool).
         get_image_info_fn:
             Callable ``(path) → (width, height, is_grayscale)``.
-            Raise or return ``(0, 0, False)`` on failure.
         """
         label_file_class = self._get_label_file_class()
         label_file = label_file_class(image_path)
-        # Do NOT deepcopy here — this method is called from a background thread,
-        # and deepcopying PyQt5 value types (QPointF) from a non-main thread can
-        # silently produce zero-valued objects on some platforms (Windows).
-        # The caller is responsible for passing shapes that are already safe copies
-        # (created via deepcopy on the main thread before the background thread starts).
-        label_file.set_shapes(shapes)
         width, height, is_grayscale = get_image_info_fn(image_path)
         if width == 0 or height == 0:
             raise RuntimeError(f"Failed to read image: {image_path}")
-        label_file.save_label(image_info={
+        label_file.save_label_from_raw(raw_shapes, image_info={
             "height": height,
             "width": width,
             "depth": 1 if is_grayscale else 3,

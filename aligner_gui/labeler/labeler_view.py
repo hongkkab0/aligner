@@ -1196,7 +1196,7 @@ class LabelerView(QMainWindow):
         target_paths = self._get_selected_paths()
         if not target_paths or self._current_image_path is None:
             return
-        selected_shapes = deepcopy(self.canvas.get_shape())
+        selected_shapes = self.canvas.get_shape()
         if len(target_paths) > 1:
             msg = self.tr(
                 "Save current labels to {} selected images?\r\n"
@@ -1209,9 +1209,23 @@ class LabelerView(QMainWindow):
         saved_paths: list[str] = []
         failed_paths: list[str] = []
 
-        # Pre-compute image dimensions on the main thread before the background
-        # thread starts. Creating / reading QImage objects from a background
-        # thread is not safe on Windows and causes silent failures.
+        # ── All Qt-object access MUST happen on the main thread ──────────────
+        # 1. Serialize shape coordinates to plain Python dicts (no QPointF).
+        # 2. Pre-compute image dimensions from QImage.
+        # The background thread then only handles pure-Python data + file I/O,
+        # which is completely safe regardless of platform.
+        raw_shapes: list = []
+        for shape in selected_shapes:
+            if len(shape.points) >= 4:
+                raw_shapes.append({
+                    'x1': shape.points[0].x(), 'y1': shape.points[0].y(),
+                    'x2': shape.points[1].x(), 'y2': shape.points[1].y(),
+                    'x3': shape.points[2].x(), 'y3': shape.points[2].y(),
+                    'x4': shape.points[3].x(), 'y4': shape.points[3].y(),
+                    'label': shape.get_label(),
+                    'isRotated': shape.isRotated,
+                })
+
         _image_info_cache: dict = {}
         for _p in target_paths:
             if _p == self._current_image_path and not self._current_image.isNull():
@@ -1233,7 +1247,7 @@ class LabelerView(QMainWindow):
         def work(idx: int):
             target_path = target_paths[idx]
             try:
-                self.viewmodel.save_shapes_to_path(target_path, selected_shapes, _get_image_info)
+                self.viewmodel.save_raw_shapes_to_path(target_path, raw_shapes, _get_image_info)
                 saved_paths.append(target_path)
             except Exception:
                 logging.exception("Failed to save labels to %s", target_path)
@@ -1244,7 +1258,7 @@ class LabelerView(QMainWindow):
 
         for path in saved_paths:
             self.viewmodel.mark_path_as_saved(
-                path, has_label=True, is_empty=(len(selected_shapes) == 0), needs_confirm=False
+                path, has_label=True, is_empty=(len(raw_shapes) == 0), needs_confirm=False
             )
         if self._current_image_path in saved_paths:
             self._set_clean()
