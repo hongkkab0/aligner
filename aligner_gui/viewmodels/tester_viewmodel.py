@@ -3,79 +3,146 @@ from __future__ import annotations
 import logging
 import os
 import traceback
-from copy import deepcopy
 from typing import TYPE_CHECKING
 
+from PyQt5.QtCore import pyqtSignal
+
 from aligner_gui.tester.thread_test import ThreadTest
-from aligner_gui.shared import const, gui_util
+from aligner_gui.shared import const
 from aligner_gui.viewmodels.base_viewmodel import ViewModelBase
 
 if TYPE_CHECKING:
-    from aligner_gui.tester.tester_view import TesterView
+    from aligner_gui.interfaces.testing import ITesterSession, ITestingThread
 
 TEST_LOGGER = logging.getLogger("aligner.tester")
 
 
 class TesterViewModel(ViewModelBase):
-    def __init__(self, view: 'TesterView', session):
-        super().__init__(view)
-        self.view = view
-        self._worker = session
-        self._th_test = ThreadTest(self._worker)
+    """Presentation-logic layer for the Tester tab.
 
-    def initialize(self):
-        self._th_test.qt_signal_stop_testing.connect(self.stop_testing)
-        self._th_test.qt_signal_update_iter.connect(self.update_iter)
-        self._th_test.qt_signal_update_test_result_summary.connect(self.update_test_result_summary)
+    Communication contract
+    ----------------------
+    View  → ViewModel : method calls only (commands).
+    ViewModel → View  : pyqtSignal only (no ``self.view.*`` access).
 
-    def get_torch(self):
-        import torch
-        return torch
+    The ViewModel owns ``_file_list`` as the single source of truth.
+    The View reads it via :meth:`get_file_list` and mutates it via command methods.
+    """
 
-    def append_files(self, paths):
-        merged = list(self.view._file_list)
-        seen = {path.lower(): path for path in merged}
+    # ------------------------------------------------------------------
+    # Signals (ViewModel → View)
+    # ------------------------------------------------------------------
+    testing_started = pyqtSignal()
+    testing_stopped = pyqtSignal(str)           # reason constant
+    iter_progress_updated = pyqtSignal(int, int)  # (iter_idx, iter_len)
+    results_updated = pyqtSignal()
+    test_blocked = pyqtSignal(str, str)         # (title, message) — view shows a dialog
+    file_list_changed = pyqtSignal()            # emitted after any mutation to _file_list
+
+    def __init__(
+        self,
+        session: "ITesterSession",
+        *,
+        testing_thread: "ITestingThread | None" = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._session = session
+        self._file_list: list[str] = []
+        self._test_result_summary = None
+
+        # Dependency injection: accept an external thread (e.g. a test double)
+        # or fall back to the real ThreadTest.
+        self._th_test: "ITestingThread" = (
+            testing_thread if testing_thread is not None else ThreadTest(self._session)
+        )
+        self._th_test.qt_signal_stop_testing.connect(self._on_thread_stopped)
+        self._th_test.qt_signal_update_iter.connect(self._on_thread_iter_updated)
+        self._th_test.qt_signal_update_test_result_summary.connect(self._on_thread_results_ready)
+
+    # ------------------------------------------------------------------
+    # Read-only session access (Model abstracted from View)
+    # ------------------------------------------------------------------
+
+    def get_project_settings(self):
+        return self._session.get_project_settings()
+
+    def get_dataset_summary_path(self) -> str:
+        return self._session.get_dataset_summary_path()
+
+    def get_mean_test_time(self) -> float:
+        return self._session.mean_test_time
+
+    def get_test_result_summary(self):
+        return self._test_result_summary
+
+    # ------------------------------------------------------------------
+    # File-list management (single source of truth)
+    # ------------------------------------------------------------------
+
+    def get_file_list(self) -> list[str]:
+        return list(self._file_list)
+
+    def append_files(self, paths: list[str]) -> None:
+        seen = {p.lower() for p in self._file_list}
+        added = False
         for path in paths:
             normalized = os.path.abspath(path)
-            key = normalized.lower()
-            if key not in seen:
-                seen[key] = normalized
-                merged.append(normalized)
-        self.view._file_list = merged
+            if normalized.lower() not in seen:
+                seen.add(normalized.lower())
+                self._file_list.append(normalized)
+                added = True
+        if added:
+            self.file_list_changed.emit()
 
-    def update_iter(self, iter_idx: int, iter_len: int):
-        self.view.progress_iter.setStyleSheet(self.view.COLOR_INFERENCE)
-        self.view.progress_iter.setMaximum(iter_len)
-        self.view.progress_iter.setValue(iter_idx + 1)
-        self.view.btn_test.setEnabled(True)
+    def remove_files_at_rows(self, rows: list[int]) -> None:
+        for row in sorted(rows, reverse=True):
+            if 0 <= row < len(self._file_list):
+                self._file_list.pop(row)
+        self.file_list_changed.emit()
 
-    def handle_test_button_clicked(self):
-        if self.view.btn_test.isChecked():
+    def reset_file_list(self, paths: list[str]) -> None:
+        self._file_list = []
+        # Bypass append_files to avoid intermediate signal emissions, emit once at end
+        seen: set[str] = set()
+        for path in paths:
+            normalized = os.path.abspath(path)
+            if normalized.lower() not in seen:
+                seen.add(normalized.lower())
+                self._file_list.append(normalized)
+        self.file_list_changed.emit()
+
+    # ------------------------------------------------------------------
+    # Test lifecycle commands (called by View)
+    # ------------------------------------------------------------------
+
+    def handle_test_button_clicked(self, is_checked: bool) -> None:
+        if is_checked:
             self.start_test()
         else:
             self.stop_testing("manual stop")
 
-    def start_test(self):
+    def start_test(self) -> None:
         try:
             self.emit_status("Starting test...")
-            if not self._worker.is_there_trained_checkpoint():
-                gui_util.get_message_box(self.view, "Invalid Test", "There is no trained model.")
-                self.view.btn_test.setChecked(False)
+            if not self._session.is_there_trained_checkpoint():
+                self.test_blocked.emit("Invalid Test", "There is no trained model.")
+                self.testing_stopped.emit(const.ERROR)
                 return
-            TEST_LOGGER.info('Test started.')
-            self._th_test.set_img_paths_to_test(deepcopy(self.view._file_list))
-            self.on_start_test()
+            TEST_LOGGER.info("Test started.")
+            self._th_test.set_img_paths_to_test(list(self._file_list))
+            self.testing_started.emit()
             self._th_test.start()
         except Exception as e:
             traceback.print_tb(e.__traceback__)
             TEST_LOGGER.error("ERROR - %s", e)
             self.stop_testing(const.ERROR)
 
-    def stop_testing(self, reason: str):
+    def stop_testing(self, reason: str) -> None:
         if self._th_test.isRunning():
             self._th_test.terminate()
 
-        torch = self.get_torch()
+        torch = self._get_torch()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -88,31 +155,26 @@ class TesterViewModel(ViewModelBase):
         else:
             TEST_LOGGER.info(reason)
             self.emit_status(reason, 3000)
-        self.on_stop_test()
+        self.testing_stopped.emit(reason)
 
-    def close(self):
+    def close(self) -> None:
         self.stop_testing("window close")
-        self.view._preview_renderer.clear()
 
-    def on_start_test(self):
-        self.view.btn_test.setChecked(True)
-        self.view.btn_test.setEnabled(False)
-        self.view.progress_iter.setMaximum(1)
-        self.view.progress_iter.setValue(0)
-        self.view.progress_iter.setStyleSheet(gui_util.get_dark_style())
-        self.view.lbl_test_indicator.show()
+    # ------------------------------------------------------------------
+    # Thread slots (private)
+    # ------------------------------------------------------------------
 
-    def on_stop_test(self):
-        self.view.btn_test.setChecked(False)
-        self.view.btn_test.setEnabled(True)
-        self.view.progress_iter.setMaximum(1)
-        self.view.progress_iter.setValue(0)
-        self.view.progress_iter.setStyleSheet(gui_util.get_dark_style())
-        self.view.lbl_test_indicator.hide()
+    def _on_thread_stopped(self, reason: str) -> None:
+        self.stop_testing(reason)
 
-    def update_test_result_summary(self):
-        self.view._worker_test_result_summary = self._worker.get_test_result_summary()
-        self.view._clear_preview_cache()
-        self.view._refresh_test_detail_table()
-        self.view._refresh_test_time()
+    def _on_thread_iter_updated(self, idx: int, total: int) -> None:
+        self.iter_progress_updated.emit(idx, total)
 
+    def _on_thread_results_ready(self) -> None:
+        self._test_result_summary = self._session.get_test_result_summary()
+        self.results_updated.emit()
+
+    @staticmethod
+    def _get_torch():
+        import torch
+        return torch

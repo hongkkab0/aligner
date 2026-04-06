@@ -27,12 +27,9 @@ TEST_LOGGER = logging.getLogger("aligner.tester")
 class TesterView(QWidget, Ui_tester_widget):
     COLOR_INFERENCE = """QProgressBar::chunk { background: yellow; }"""
 
-    def __init__(self, main_window, session, is_new: bool):
+    def __init__(self, session, is_new: bool):
         super().__init__()
         self.setupUi(self)
-        from aligner_gui.main_window import MainWindow
-        self._main_window: MainWindow = main_window
-        self._worker = session
         self._is_new = is_new
 
         icon = QtGui.QIcon()
@@ -110,14 +107,20 @@ class TesterView(QWidget, Ui_tester_widget):
         self._classes = []
         self._class_index = {}
         self._class_name = {}
-        self._file_list = []
         self._last_preview_key = None
-        self._preview_renderer = TesterPreviewRenderer(self._get_cv2, self._worker.get_project_settings)
-        self.viewmodel = TesterViewModel(self, session)
-        self.viewmodel.status_message_requested.connect(self._main_window.statusBar().showMessage)
-        self.viewmodel.initialize()
 
-        if self._is_new == False:
+        self.viewmodel = TesterViewModel(session, parent=self)
+        self.viewmodel.testing_started.connect(self._on_testing_started)
+        self.viewmodel.testing_stopped.connect(self._on_testing_stopped)
+        self.viewmodel.iter_progress_updated.connect(self._on_iter_progress_updated)
+        self.viewmodel.results_updated.connect(self._on_results_updated)
+        self.viewmodel.test_blocked.connect(
+            lambda title, msg: gui_util.get_message_box(self, title, msg)
+        )
+
+        self._preview_renderer = TesterPreviewRenderer(self._get_cv2, self.viewmodel.get_project_settings)
+
+        if not self._is_new:
             self.reload_file_list()
 
     def _get_torch(self):
@@ -149,33 +152,47 @@ class TesterView(QWidget, Ui_tester_widget):
             img_path = self.table_file_list.item(idx, 0).text()
             self._change_selected_image_table_file_list(img_path)
 
-    def _append_files(self, paths):
+    def _append_files(self, paths: list) -> None:
         self.viewmodel.append_files(paths)
 
-    def _update_iter_th_test(self, iter_idx: int, iter_len: int):
-        self.viewmodel.update_iter(iter_idx, iter_len)
+    def _clicked_btn_test(self) -> None:
+        self.viewmodel.handle_test_button_clicked(self.btn_test.isChecked())
 
-    def _clicked_btn_test(self):
-        self.viewmodel.handle_test_button_clicked()
-
-    def _start_test(self):
-        self.viewmodel.start_test()
-
-    def _stop_testing(self, reason: str):
-        self.viewmodel.stop_testing(reason)
-
-    def close(self):
+    def close(self) -> bool:
         self.viewmodel.close()
         return super().close()
 
-    def _on_start_test(self):
-        self.viewmodel.on_start_test()
+    # ------------------------------------------------------------------
+    # ViewModel signal slots
+    # ------------------------------------------------------------------
 
-    def _on_stop_test(self):
-        self.viewmodel.on_stop_test()
+    def _on_testing_started(self) -> None:
+        self.btn_test.setChecked(True)
+        self.btn_test.setEnabled(False)
+        self.progress_iter.setMaximum(1)
+        self.progress_iter.setValue(0)
+        self.progress_iter.setStyleSheet(gui_util.get_dark_style())
+        self.lbl_test_indicator.show()
 
-    def _update_test_result_summary(self):
-        self.viewmodel.update_test_result_summary()
+    def _on_testing_stopped(self, _reason: str) -> None:
+        self.btn_test.setChecked(False)
+        self.btn_test.setEnabled(True)
+        self.progress_iter.setMaximum(1)
+        self.progress_iter.setValue(0)
+        self.progress_iter.setStyleSheet(gui_util.get_dark_style())
+        self.lbl_test_indicator.hide()
+
+    def _on_iter_progress_updated(self, idx: int, total: int) -> None:
+        self.progress_iter.setStyleSheet(self.COLOR_INFERENCE)
+        self.progress_iter.setMaximum(total)
+        self.progress_iter.setValue(idx + 1)
+        self.btn_test.setEnabled(True)
+
+    def _on_results_updated(self) -> None:
+        self._worker_test_result_summary = self.viewmodel.get_test_result_summary()
+        self._clear_preview_cache()
+        self._refresh_test_detail_table()
+        self._refresh_test_time()
 
     def _refresh_test_detail_table(self):
         selected_img_path = None
@@ -269,9 +286,8 @@ class TesterView(QWidget, Ui_tester_widget):
         self.table_test_detail.setUpdatesEnabled(True)
         del table_blocker
 
-    def _refresh_test_time(self):
-        time_msg = '%.3fsec/image' % (self._worker.mean_test_time)
-        self.label_time.setText(time_msg)
+    def _refresh_test_time(self) -> None:
+        self.label_time.setText("%.3fsec/image" % self.viewmodel.get_mean_test_time())
 
     def _change_selected_image_table_file_list(self, img_path):
         preview_key = ("file", img_path)
@@ -387,13 +403,13 @@ class TesterView(QWidget, Ui_tester_widget):
         self.table_test_detail.setSortingEnabled(True)
         self.table_test_detail.sortByColumn(self.table_test_detail_sort_col, Qt.DescendingOrder)
 
-    def _clicked_btn_add(self):
-        extensions = gui_util.SUPPORTED_IMAGE_FORMATS_WITHOUT_DOT
-        file_paths = gui_util.get_files_from_dialog(self, is_open=True, ext_list=extensions)
-        if len(file_paths) == 0:
+    def _clicked_btn_add(self) -> None:
+        file_paths = gui_util.get_files_from_dialog(
+            self, is_open=True, ext_list=gui_util.SUPPORTED_IMAGE_FORMATS_WITHOUT_DOT
+        )
+        if not file_paths:
             return
-
-        self._append_files(file_paths)
+        self.viewmodel.append_files(file_paths)
         self._clear_preview_cache()
         self._refresh_table_file_list()
 
@@ -410,27 +426,22 @@ class TesterView(QWidget, Ui_tester_widget):
         images.sort(key=lambda x: x.lower())
         return images
 
-    def _clicked_btn_add_folder(self):
-        dir_path = gui_util.get_open_dir_from_dialog(self,
-                                                     "Choose a directory to test images")
+    def _clicked_btn_add_folder(self) -> None:
+        dir_path = gui_util.get_open_dir_from_dialog(self, "Choose a directory to test images")
         if dir_path == "":
             return
-
-        image_paths = self._scan_all_images(dir_path)
-        self._append_files(image_paths)
+        self.viewmodel.append_files(self._scan_all_images(dir_path))
         self._clear_preview_cache()
         self._refresh_table_file_list()
 
-    def _clicked_btn_delete(self):
-        selected_indexes = self.table_file_list.selectionModel().selectedIndexes()
-        removed_rows = set()
-        for idx in reversed(selected_indexes):
-            if idx.column() == 0:
-                row = idx.row()
-                if row not in removed_rows:
-                    self._file_list.pop(row)
-                    removed_rows.add(row)
-        if removed_rows:
+    def _clicked_btn_delete(self) -> None:
+        rows = sorted(
+            {idx.row() for idx in self.table_file_list.selectionModel().selectedIndexes()
+             if idx.column() == 0},
+            reverse=True,
+        )
+        if rows:
+            self.viewmodel.remove_files_at_rows(rows)
             self._clear_preview_cache()
             self._refresh_table_file_list()
 
@@ -457,24 +468,24 @@ class TesterView(QWidget, Ui_tester_widget):
         gui_util.table2csv(self.table_test_detail, file_name)
         gui_util.get_message_box(self, "Export test result", "Test result is saved to %s." % (file_name))
 
-    def reload_file_list(self):
+    def reload_file_list(self) -> None:
         try:
-            dataset_summary_path = self._worker.get_dataset_summary_path()
-            with open(dataset_summary_path, 'r', encoding='utf-8') as f:
+            dataset_summary_path = self.viewmodel.get_dataset_summary_path()
+            with open(dataset_summary_path, "r", encoding="utf-8") as f:
                 self._dataset_summary = json.load(f)
         except Exception as e:
             TEST_LOGGER.info(e)
             return
 
-        self._classes = [c['name'] for c in self._dataset_summary['class_summary']['classes']]
+        self._classes = [c["name"] for c in self._dataset_summary["class_summary"]["classes"]]
         self._class_index = {v: idx for idx, v in enumerate(self._classes)}
         self._class_name = {idx: v for idx, v in enumerate(self._classes)}
-        self._file_list = []
-        self._append_files([data['img_path'] for data in self._dataset_summary['data_summary']])
+        self.viewmodel.reset_file_list([data["img_path"] for data in self._dataset_summary["data_summary"]])
         self._clear_preview_cache()
         self._refresh_table_file_list()
 
-    def _refresh_table_file_list(self):
+    def _refresh_table_file_list(self) -> None:
+        file_list = self.viewmodel.get_file_list()
         selected_paths = {
             self.table_file_list.item(index.row(), 0).text()
             for index in self.table_file_list.selectedIndexes()
@@ -484,18 +495,16 @@ class TesterView(QWidget, Ui_tester_widget):
         table_blocker = QSignalBlocker(self.table_file_list)
         self.table_file_list.setUpdatesEnabled(False)
         self.table_file_list.clear()
-        column_names = ['Path', 'Label']
+        column_names = ["Path", "Label"]
         self.table_file_list.setColumnCount(len(column_names))
         self.table_file_list.setHorizontalHeaderLabels(column_names)
         self.table_file_list.setColumnWidth(0, 150)
         self.table_file_list.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.table_file_list.setRowCount(len(self._file_list))
-        for idx, img_path in enumerate(self._file_list):
+        self.table_file_list.setRowCount(len(file_list))
+        for idx, img_path in enumerate(file_list):
             self.table_file_list.setItem(idx, 0, QTableWidgetItem(img_path))
-            if self._exist_label_file_of_img_path(img_path):
-                self.table_file_list.setItem(idx, 1, QTableWidgetItem('O'))
-            else:
-                self.table_file_list.setItem(idx, 1, QTableWidgetItem('X'))
+            label = "O" if self._exist_label_file_of_img_path(img_path) else "X"
+            self.table_file_list.setItem(idx, 1, QTableWidgetItem(label))
             if img_path in selected_paths:
                 self.table_file_list.selectRow(idx)
         self.table_file_list.setUpdatesEnabled(True)

@@ -3,223 +3,278 @@ from __future__ import annotations
 import logging
 import time
 import traceback
-from typing import Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, Optional, TypedDict
 
-from PyQt5.QtCore import QTimer
+from PyQt5.QtCore import QTimer, pyqtSignal
 
-from aligner_gui.project.project_dataset_service import build_dataset_summary_from_project
 from aligner_gui.trainer.gpu_monitor import GpuUsageSnapshot, NvidiaSmiPoller
 from aligner_gui.trainer.thread_train import ThreadTrain
 from aligner_gui.trainer.training_timer import TrainingTimer, timestamp2time
-from aligner_gui.shared import const, gui_util
+from aligner_gui.shared import const
 from aligner_gui.viewmodels.base_viewmodel import ViewModelBase
-from aligner_gui.shared.progress_general_dialog import ProgressGeneralDialog
 from aligner_engine.const import PHASE_TYPE_TRAINING, PHASE_TYPE_VALIDATION
 from aligner_engine.project_settings import ProjectSettings
 
 if TYPE_CHECKING:
-    from aligner_gui.trainer.trainer_view import TrainerView
+    from aligner_gui.interfaces.training import ITrainerSession, ITrainingThread
 
 TRAIN_LOGGER = logging.getLogger("aligner.trainer")
 
 
+class DeviceUsageInfo(TypedDict):
+    """Payload emitted by :attr:`TrainerViewModel.device_usage_updated`.
+
+    visible  : Whether a GPU is available; False means CPU-only mode.
+    title    : Label for the device panel header (e.g. "GPU Mem" or "CPU").
+    percent  : Human-readable percentage string (e.g. "72%"), empty when invisible.
+    value    : Integer 0-100 for the progress bar; 0 when invisible.
+    info     : Detailed memory string shown in the panel body.
+    tooltip  : Device name for the tooltip, empty when invisible.
+    """
+    visible: bool
+    title: str
+    percent: str
+    value: int
+    info: str
+    tooltip: str
+
+
 class TrainerViewModel(ViewModelBase):
-    def __init__(self, view: 'TrainerView', session, tester_reload_callback: Callable[[], None] | None = None):
-        super().__init__(view)
-        self.view = view
-        self._worker = session
+    """Presentation-logic layer for the Trainer tab.
+
+    Communication contract
+    ----------------------
+    View  → ViewModel : method calls only (commands).
+    ViewModel → View  : pyqtSignal only (no ``self.view.*`` access).
+
+    The View is responsible for all widget reads (e.g. checkbox states) and
+    must pass those values as arguments when calling command methods.
+    """
+
+    # ------------------------------------------------------------------
+    # Signals (ViewModel → View)
+    # ------------------------------------------------------------------
+
+    # Training lifecycle
+    training_started = pyqtSignal(bool, int)    # (is_resume, start_epoch)
+    training_stopped = pyqtSignal(str)           # reason constant
+
+    # Per-epoch / per-iter progress
+    epoch_updated = pyqtSignal(int, str)         # (epoch, ckpt_path)
+    iter_updated = pyqtSignal(str, int, int)     # (phase_type, iter_idx, iter_len)
+    training_time_updated = pyqtSignal(str)      # formatted time string
+    status_label_updated = pyqtSignal(str)       # transient status message for label
+
+    # Resume checkbox
+    resume_state_changed = pyqtSignal(bool, int)  # (can_resume, last_epoch)
+
+    # GPU / device panel
+    device_usage_updated = pyqtSignal(dict)      # payload schema: DeviceUsageInfo
+
+    # Global app status (consumed by MainWindowViewModel)
+    app_status_changed = pyqtSignal(bool)        # True = training, False = idle
+
+    def __init__(
+        self,
+        session: "ITrainerSession",
+        tester_reload_callback: Optional[Callable[[], None]] = None,
+        *,
+        training_thread: "ITrainingThread | None" = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._session = session
         self._tester_reload_callback = tester_reload_callback
-        self._th_train = ThreadTrain(self._worker)
+
+        # Dependency injection: accept an externally-supplied thread (e.g. a
+        # test double) or fall back to the real ThreadTrain.
+        self._th_train: "ITrainingThread" = (
+            training_thread if training_thread is not None else ThreadTrain(self._session)
+        )
+        self._th_train.qt_signal_stop_training.connect(self._on_thread_stopped)
+        self._th_train.qt_signal_update_epoch.connect(self._on_thread_epoch_updated)
+        self._th_train.qt_signal_update_iter.connect(self._on_thread_iter_updated)
+        self._th_train.qt_signal_status.connect(self._on_thread_status)
+
         self._training_timer = TrainingTimer()
-        self._device_poll_timer = QTimer(view)
+        self._device_poll_timer = QTimer(self)
         self._device_poll_timer.setInterval(1500)
-        self._device_poll_timer.timeout.connect(self.refresh_device_usage)
-        self._gpu_monitor = NvidiaSmiPoller(view)
-        self._gpu_monitor.stats_updated.connect(self.apply_gpu_snapshot)
-        self._gpu_monitor.unavailable.connect(self.handle_gpu_monitor_unavailable)
+        self._device_poll_timer.timeout.connect(self._poll_device_usage)
+
+        self._gpu_monitor = NvidiaSmiPoller(self)
+        self._gpu_monitor.stats_updated.connect(self._on_gpu_snapshot)
+        self._gpu_monitor.unavailable.connect(self._on_gpu_unavailable)
         self._gpu_monitor_available: bool | None = None
+
         self._current_epoch_for_eta = 1
         self._last_iter_ui_update_ts = 0.0
 
-    def initialize(self):
-        self.view._init_model_profile_ui()
-        self.view.btn_train.clicked.connect(self.handle_train_button_clicked)
-        self.view.check_hflip.clicked.connect(self.clicked_check_hflip)
-        self.view.check_vflip.clicked.connect(self.clicked_check_vflip)
-        self.view.check_no_rotation.clicked.connect(self.clicked_check_no_rotation)
-        self.view.check_include_empty.clicked.connect(self.clicked_check_include_empty)
-        self.view.spin_resize.valueChanged.connect(self.changed_spin_resize)
-        self.view.spin_batch_size.valueChanged.connect(self.changed_spin_batch_size)
-        self.view.spin_max_epochs.valueChanged.connect(self.changed_max_epochs)
-        self.view.table_training_history.clicked.connect(self.view._clicked_table_training_history)
+    # ------------------------------------------------------------------
+    # Read-only properties
+    # ------------------------------------------------------------------
 
-        settings = self.get_settings()
-        self.view.check_hflip.setChecked(settings.aug_flip_horizontal_use)
-        self.view.check_vflip.setChecked(settings.aug_flip_vertical_use)
-        self.view.check_no_rotation.setChecked(settings.no_rotation)
-        self.view.check_include_empty.setChecked(settings.include_empty)
-        self.view.spin_resize.setValue(settings.resize)
-        self.view.spin_batch_size.setValue(settings.batch_size)
-        self.view.spin_max_epochs.setValue(settings.max_epochs)
+    @property
+    def is_training(self) -> bool:
+        return self._th_train.isRunning()
 
-        self._th_train.qt_signal_stop_training.connect(self.stop_training)
-        self._th_train.qt_signal_update_epoch.connect(self.update_epoch)
-        self._th_train.qt_signal_update_iter.connect(self.update_iter)
-        self._th_train.qt_signal_status.connect(self.update_training_status)
-        self.refresh_resume_ui()
+    @property
+    def metric_name(self) -> str:
+        return self._session.metric_name
+
+    # ------------------------------------------------------------------
+    # Settings (Model access abstracted away from View)
+    # ------------------------------------------------------------------
 
     def get_settings(self) -> ProjectSettings:
-        return self._worker.get_project_settings()
+        return self._session.get_project_settings()
 
-    def save_settings(self, settings: ProjectSettings):
-        self._worker.set_project_settings(settings)
+    def save_settings(self, settings: ProjectSettings) -> None:
+        self._session.set_project_settings(settings)
 
-    def clicked_check_hflip(self):
+    def update_setting(self, **kwargs) -> None:
+        settings = self._session.get_project_settings()
+        for key, value in kwargs.items():
+            setattr(settings, key, value)
+        self._session.set_project_settings(settings)
+
+    def get_model_profiles(self):
+        return self._session.get_model_profiles()
+
+    # ------------------------------------------------------------------
+    # Training history (Model access abstracted away from View)
+    # ------------------------------------------------------------------
+
+    def get_train_summary(self):
+        return self._session.get_train_summary()
+
+    def get_train_result_summary(self):
+        return self._session.get_train_result_summary()
+
+    def get_valid_result_summary(self):
+        return self._session.get_valid_result_summary()
+
+    def save_records_after_epoch(self, epoch: int, ckpt_path: str) -> None:
+        self._session.save_records_after_epoch(epoch, ckpt_path)
+
+    # ------------------------------------------------------------------
+    # Resume helpers
+    # ------------------------------------------------------------------
+
+    def refresh_resume_state(self) -> None:
+        can_resume = self._session.can_resume_training()
+        last_epoch = self._session.get_last_completed_epoch()
+        self.resume_state_changed.emit(can_resume, last_epoch)
+
+    # ------------------------------------------------------------------
+    # Training assets (work function for ProgressGeneralDialog)
+    # ------------------------------------------------------------------
+
+    def prepare_training_assets(self, processing_signal) -> bool:
+        """Passed as the ``work`` arg of ProgressGeneralDialog.
+
+        Called from the dialog's worker thread; raises on failure.
+        """
+        from aligner_gui.project.project_dataset_service import build_dataset_summary_from_project
+
         settings = self.get_settings()
-        settings.aug_flip_horizontal_use = self.view.check_hflip.isChecked()
-        self.save_settings(settings)
-
-    def clicked_check_vflip(self):
-        settings = self.get_settings()
-        settings.aug_flip_vertical_use = self.view.check_vflip.isChecked()
-        self.save_settings(settings)
-
-    def clicked_check_no_rotation(self):
-        settings = self.get_settings()
-        settings.no_rotation = self.view.check_no_rotation.isChecked()
-        self.save_settings(settings)
-
-    def clicked_check_include_empty(self):
-        settings = self.get_settings()
-        settings.include_empty = self.view.check_include_empty.isChecked()
-        self.save_settings(settings)
-
-    def changed_spin_resize(self):
-        settings = self.get_settings()
-        settings.resize = self.view.spin_resize.value()
-        self.save_settings(settings)
-
-    def changed_max_epochs(self):
-        settings = self.get_settings()
-        settings.max_epochs = self.view.spin_max_epochs.value()
-        self.save_settings(settings)
-
-    def changed_spin_batch_size(self):
-        settings = self.get_settings()
-        settings.batch_size = self.view.spin_batch_size.value()
-        self.save_settings(settings)
-
-    def changed_model_profile(self):
-        if not self.view.combo_model_profile.isEnabled():
-            return
-        profile_id = self.view.combo_model_profile.currentData()
-        if not profile_id:
-            return
-        settings = self.get_settings()
-        if settings.model_profile == profile_id:
-            return
-        settings.model_profile = profile_id
-        self.save_settings(settings)
-
-    def get_torch(self):
-        import torch
-        return torch
-
-    def prepare_training_assets(self) -> bool:
-        settings = self.get_settings()
-
-        def work(processing_signal):
-            processing_signal.emit(1, "Building dataset summary...")
-            build_dataset_summary_from_project(
-                self._worker.project_path,
-                self._worker.get_dataset_summary_path(),
-                settings.include_empty,
-            )
-            processing_signal.emit(2, "Preparing training workspace...")
-            return True
-
-        dlg = ProgressGeneralDialog("Preparing training...", work, 2)
-        dlg.exec_()
-        if not dlg.is_success:
-            gui_util.get_message_box(
-                self.view,
-                "Invalid Dataset",
-                "Failed to prepare the dataset.\nChoose images in the labeler first and make sure enough labeled data exists.",
-            )
-            return False
-
-        if self._tester_reload_callback is not None:
-            self._tester_reload_callback()
+        processing_signal.emit(1, "Building dataset summary...")
+        build_dataset_summary_from_project(
+            self._session.project_path,
+            self._session.get_dataset_summary_path(),
+            settings.include_empty,
+        )
+        processing_signal.emit(2, "Preparing training workspace...")
         return True
 
-    def refresh_resume_ui(self):
-        can_resume = self._worker.can_resume_training()
-        last_epoch = self._worker.get_last_completed_epoch()
-        self.view.check_resume.setEnabled(can_resume)
-        if not can_resume:
-            self.view.check_resume.setChecked(False)
-            self.view.check_resume.setToolTip("Enable after at least one checkpoint has been saved.")
-            return
-        resume_epoch = last_epoch + 1 if last_epoch > 0 else 1
-        self.view.check_resume.setToolTip(
-            f"Continue training from auto_saved\\last.pth.\nNext epoch: {resume_epoch}"
-        )
+    # ------------------------------------------------------------------
+    # Training lifecycle commands (called by View)
+    # ------------------------------------------------------------------
 
-    def refresh_existing_training_monitor(self, last_epoch: int):
-        self.view._refresh_training_chart(
-            self._worker.get_train_summary(),
-            self._worker.get_train_result_summary(),
-            self._worker.get_valid_result_summary(),
-        )
-        self.view._refresh_training_history_table(
-            self._worker.get_train_summary(),
-            self._worker.get_train_result_summary(),
-            self._worker.get_valid_result_summary(),
-        )
-        self.view._refresh_validation_table(last_epoch, self._worker.get_valid_result_summary())
+    def validate_start_training(self, resume: bool) -> tuple[bool, str]:
+        """Returns ``(ok, error_key)``."""
+        if resume and not self._session.can_resume_training():
+            return False, "no_checkpoint"
+        if resume and self._session.get_last_completed_epoch() >= self.get_settings().max_epochs:
+            return False, "max_epochs_reached"
+        return True, ""
 
-    def start_training(self):
+    def begin_training_prep(self, resume: bool) -> None:
+        """Emit training_started so View updates UI before the prep dialog appears."""
+        last_epoch = self._session.get_last_completed_epoch() if resume else 0
+        settings = self.get_settings()
+        self._training_timer.train_start(last_epoch, settings.max_epochs)
+        self._current_epoch_for_eta = max(last_epoch + 1, 1)
+        self._last_iter_ui_update_ts = 0.0
+        self.training_started.emit(resume, last_epoch)
+
+    def launch_training(self, resume: bool) -> None:
+        """Start the background training thread (call after prep dialog succeeds)."""
         try:
-            self.emit_status("Starting training...")
-            TRAIN_LOGGER.info('start training')
-            resume_training = self.view.check_resume.isChecked()
-            if resume_training and not self._worker.can_resume_training():
-                self.refresh_resume_ui()
-                gui_util.get_message_box(
-                    self.view,
-                    "Resume Unavailable",
-                    "No last checkpoint was found.\nRun at least one epoch first or start a fresh training.",
-                )
-                self.view.btn_train.setChecked(False)
-                return
-            if resume_training and self._worker.get_last_completed_epoch() >= self.get_settings().max_epochs:
-                gui_util.get_message_box(
-                    self.view,
-                    "Resume Unavailable",
-                    "The latest checkpoint already reached the configured max epochs.\nIncrease Epochs to continue training.",
-                )
-                self.view.btn_train.setChecked(False)
-                return
-            self.on_start_training(resume_training)
-            if not self.prepare_training_assets():
-                self.stop_training(const.ERROR)
-                return
-            TRAIN_LOGGER.info("Dataset is built successfully")
-            torch = self.get_torch()
+            TRAIN_LOGGER.info("start training")
+            if self._tester_reload_callback is not None:
+                self._tester_reload_callback()
+            self.app_status_changed.emit(True)
+            self._gpu_monitor_available = None
+
+            torch = self._get_torch()
             if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            self._th_train.set_resume_training(resume_training)
+                self._gpu_monitor.set_preferred_device_index(torch.cuda.current_device())
+
+            self._device_poll_timer.start()
+            self._poll_device_usage()
+
+            self._th_train.set_resume_training(resume)
             self._th_train.start()
         except Exception as e:
             traceback.print_tb(e.__traceback__)
             TRAIN_LOGGER.error("ERROR - %s", e)
-            self.stop_training(const.ERROR)
+            self.app_status_changed.emit(False)
+            self.training_stopped.emit(const.ERROR)
 
-    def stop_training(self, reason: str):
+    def abort_training_prep(self) -> None:
+        """Called by View when the preparation dialog fails or is cancelled."""
+        self.training_stopped.emit(const.ERROR)
+
+    def stop_training(self, reason: str) -> None:
+        if self._th_train.isRunning():
+            self._th_train.terminate()
+        else:
+            self._finalize_stop(reason)
+
+    def close(self) -> None:
         if self._th_train.isRunning():
             self._th_train.terminate()
 
-        torch = self.get_torch()
+    # ------------------------------------------------------------------
+    # ThreadTrain slots (private — forward to View via signals)
+    # ------------------------------------------------------------------
+
+    def _on_thread_stopped(self, reason: str) -> None:
+        self._finalize_stop(reason)
+
+    def _on_thread_epoch_updated(self, epoch: int, ckpt_path: str) -> None:
+        self._current_epoch_for_eta = epoch + 1
+        self.save_records_after_epoch(epoch, ckpt_path)
+        self.epoch_updated.emit(epoch, ckpt_path)
+        self._emit_training_time_epoch(epoch)
+
+    def _on_thread_iter_updated(self, phase: str, idx: int, total: int) -> None:
+        self.iter_updated.emit(phase, idx, total)
+        now = time.monotonic()
+        is_last = total > 0 and (idx + 1) >= total
+        if is_last or (now - self._last_iter_ui_update_ts) >= 0.15:
+            self._last_iter_ui_update_ts = now
+            self._emit_training_time_live(phase, idx, total)
+
+    def _on_thread_status(self, message: str) -> None:
+        self.status_label_updated.emit(message)
+
+    def _finalize_stop(self, reason: str) -> None:
+        self._device_poll_timer.stop()
+        self._gpu_monitor.stop()
+        self._gpu_monitor_available = None
+
+        torch = self._get_torch()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -231,212 +286,93 @@ class TrainerViewModel(ViewModelBase):
             self.emit_status("Training failed.", 3000)
         else:
             TRAIN_LOGGER.info(reason)
-            self.emit_status(reason, 3000)
-        self.on_stop_training()
 
-    def on_start_training(self, resume_training: bool):
-        settings = self.get_settings()
-        last_epoch = self._worker.get_last_completed_epoch() if resume_training else 0
+        self.app_status_changed.emit(False)
+        self.training_stopped.emit(reason)
+        self.refresh_resume_state()
 
-        self.view.btn_train.setChecked(True)
-        self.view.btn_train.setText("Stop")
-        self.view.btn_train.setEnabled(True)
+    # ------------------------------------------------------------------
+    # Time-label helpers
+    # ------------------------------------------------------------------
 
-        if resume_training and last_epoch > 0:
-            self.view.label_time.setText(f"Resuming from epoch {last_epoch + 1}...")
-        else:
-            self.view.label_time.setText("Preparing training...")
-        self.view.label_device_title.setText("GPU Mem")
-        self.view.label_device_percent.setText("")
-        self.view.label_runtime_info.setText("VRAM --/--")
-        if resume_training and last_epoch > 0:
-            self.refresh_existing_training_monitor(last_epoch)
-        else:
-            self.view._init_training_chart()
-            self.view._init_training_history()
-            self.view._init_validation_table()
-
-        self.view.progress_epoch.setMaximum(settings.max_epochs)
-        self.view.progress_epoch.setValue(last_epoch)
-        self.view.progress_epoch.setStyleSheet(gui_util.get_dark_style())
-
-        self.view.progress_iter.setMaximum(1)
-        self.view.progress_iter.setValue(0)
-        self.view.progress_iter.setStyleSheet(gui_util.get_dark_style())
-        self.view.lbl_train_indicator.show()
-
-        self.view.check_hflip.setEnabled(False)
-        self.view.check_vflip.setEnabled(False)
-        self.view.check_no_rotation.setEnabled(False)
-        self.view.check_include_empty.setEnabled(False)
-        self.view.check_resume.setEnabled(False)
-        self.view.combo_model_profile.setEnabled(False)
-        self.view.spin_resize.setEnabled(False)
-        self.view.spin_batch_size.setEnabled(False)
-        self.view.spin_max_epochs.setEnabled(False)
-
-        self._training_timer.train_start(last_epoch, settings.max_epochs)
-        self._current_epoch_for_eta = max(last_epoch + 1, 1)
-        self._last_iter_ui_update_ts = 0.0
-        self._gpu_monitor_available = None
-        self.view.progress_device_usage.setValue(0)
-        self.view.progress_device_usage.show()
-        torch = self.get_torch()
-        if torch.cuda.is_available():
-            self._gpu_monitor.set_preferred_device_index(torch.cuda.current_device())
-        self._device_poll_timer.start()
-        self.refresh_device_usage()
-        self.view._main_window.set_app_status_training()
-
-    def on_stop_training(self):
-        self.view.btn_train.setChecked(False)
-        self.view.btn_train.setText("Train")
-        self.view.btn_train.setEnabled(True)
-        self.view.progress_epoch.setMaximum(1)
-        self.view.progress_epoch.setValue(0)
-        self.view.progress_epoch.setStyleSheet(gui_util.get_dark_style())
-        self.view.progress_iter.setMaximum(1)
-        self.view.progress_iter.setValue(0)
-        self.view.progress_iter.setStyleSheet(gui_util.get_dark_style())
-        self.view.lbl_train_indicator.hide()
-        self.view.check_hflip.setEnabled(True)
-        self.view.check_vflip.setEnabled(True)
-        self.view.check_no_rotation.setEnabled(True)
-        self.view.check_include_empty.setEnabled(True)
-        self.view.combo_model_profile.setEnabled(False)
-        self.view.spin_resize.setEnabled(True)
-        self.view.spin_batch_size.setEnabled(True)
-        self.view.spin_max_epochs.setEnabled(True)
-        self.refresh_resume_ui()
-        self._device_poll_timer.stop()
-        self._gpu_monitor.stop()
-        self._gpu_monitor_available = None
-        self.view.progress_device_usage.hide()
-        self.view.progress_device_usage.setValue(0)
-        self.view.label_device_percent.setText("")
-        self.view.label_device_title.setText("GPU Mem")
-        self.view.label_runtime_info.setText("VRAM --/--")
-        self.view._main_window.set_app_status_idle()
-
-    def update_training_status(self, message: str):
-        if self.view.progress_epoch.value() == 0 and self.view.progress_iter.value() == 0:
-            self.view.label_time.setText(message)
-
-    def handle_train_button_clicked(self):
-        if self.view.btn_train.isChecked():
-            self.start_training()
-        else:
-            self.stop_training("The process has been terminated at the user's request.")
-
-    def refresh_training_time(self, cur_epoch):
-        _one_epoch, avg_one_epoch, processed, remaining = self._training_timer.one_epoch_done(cur_epoch)
-        self.view.label_time.setText(
-            'Avg epoch %.1fs   Elapsed %s   Remaining %s' % (avg_one_epoch, timestamp2time(processed), timestamp2time(remaining))
+    def _emit_training_time_epoch(self, cur_epoch: int) -> None:
+        _one, avg, processed, remaining = self._training_timer.one_epoch_done(cur_epoch)
+        self.training_time_updated.emit(
+            "Avg epoch %.1fs   Elapsed %s   Remaining %s"
+            % (avg, timestamp2time(processed), timestamp2time(remaining))
         )
 
-    def refresh_training_time_live(self, phase_type: str, iter_idx: int, iter_len: int):
-        current_epoch = min(max(self.view.progress_epoch.value() + 1, 1), max(self.view.progress_epoch.maximum(), 1))
-        self._current_epoch_for_eta = current_epoch
+    def _emit_training_time_live(self, phase: str, idx: int, total: int) -> None:
+        epoch = min(max(self._current_epoch_for_eta, 1), 99999)
         avg_step, processed, remaining = self._training_timer.one_iter_progress(
-            phase_type, iter_idx, iter_len, current_epoch,
+            phase, idx, total, epoch
         )
-        phase_name = "Train" if phase_type == PHASE_TYPE_TRAINING else "Valid"
-        self.view.label_time.setText(
-            f'{phase_name} {iter_idx + 1}/{iter_len}   Avg step {avg_step:.2f}s   Elapsed {timestamp2time(processed)}   Remaining {timestamp2time(remaining)}'
+        phase_name = "Train" if phase == PHASE_TYPE_TRAINING else "Valid"
+        self.training_time_updated.emit(
+            f"{phase_name} {idx + 1}/{total}   Avg step {avg_step:.2f}s"
+            f"   Elapsed {timestamp2time(processed)}   Remaining {timestamp2time(remaining)}"
         )
 
-    def sample_gpu_memory_stats(self):
-        torch = self.get_torch()
+    # ------------------------------------------------------------------
+    # GPU / device monitoring (results forwarded to View via signal)
+    # ------------------------------------------------------------------
+
+    def _poll_device_usage(self) -> None:
+        torch = self._get_torch()
         if not torch.cuda.is_available():
-            return None
+            self.device_usage_updated.emit(
+                {"visible": False, "title": "CPU", "percent": "", "info": "Device: CPU training", "tooltip": ""}
+            )
+            return
+        if self._gpu_monitor_available is not True:
+            self._emit_gpu_fallback()
+        self._gpu_monitor.poll()
+
+    def _on_gpu_snapshot(self, snapshot: GpuUsageSnapshot) -> None:
+        self._gpu_monitor_available = True
+        pct = max(0.0, min(snapshot.memory_percent, 100.0))
+        self.device_usage_updated.emit({
+            "visible": True,
+            "title": "GPU Mem",
+            "percent": f"{pct:.0f}%",
+            "value": int(round(pct)),
+            "info": f"{snapshot.memory_used_mb / 1024:.1f}/{snapshot.memory_total_mb / 1024:.1f} GB ({pct:.0f}%)",
+            "tooltip": snapshot.name,
+        })
+
+    def _on_gpu_unavailable(self, _: str) -> None:
+        self._gpu_monitor_available = False
+        self._emit_gpu_fallback()
+
+    def _emit_gpu_fallback(self) -> None:
+        torch = self._get_torch()
+        if not torch.cuda.is_available():
+            self.device_usage_updated.emit(
+                {"visible": False, "title": "CPU", "percent": "", "info": "Device: CPU training", "tooltip": ""}
+            )
+            return
         device_index = torch.cuda.current_device()
         device_name = torch.cuda.get_device_name(device_index)
         try:
-            free_memory, total_memory = torch.cuda.mem_get_info(device_index)
-            total_memory = max(total_memory, 1)
-            used_memory = max(total_memory - free_memory, 0)
+            free, total = torch.cuda.mem_get_info(device_index)
+            total = max(total, 1)
+            used = max(total - free, 0)
         except Exception:
             props = torch.cuda.get_device_properties(device_index)
-            total_memory = max(props.total_memory, 1)
-            allocated_memory = torch.cuda.memory_allocated(device_index)
-            reserved_memory = torch.cuda.memory_reserved(device_index)
-            used_memory = max(allocated_memory, reserved_memory)
-        usage = used_memory * 100.0 / total_memory
-        return {
-            "device_name": device_name,
-            "memory_percent": usage,
-            "text": f'{used_memory / (1024 ** 3):.1f}/{total_memory / (1024 ** 3):.1f} GB ({usage:.0f}%)',
-        }
+            total = max(props.total_memory, 1)
+            used = max(torch.cuda.memory_allocated(device_index),
+                       torch.cuda.memory_reserved(device_index))
+        pct = used * 100.0 / total
+        self.device_usage_updated.emit({
+            "visible": True,
+            "title": "GPU Mem",
+            "percent": f"{pct:.0f}%",
+            "value": int(round(max(0, min(pct, 100)))),
+            "info": f"{used / (1024**3):.1f}/{total / (1024**3):.1f} GB ({pct:.0f}%)",
+            "tooltip": device_name,
+        })
 
-    def refresh_device_usage(self):
-        torch = self.get_torch()
-        if not torch.cuda.is_available():
-            self.view.progress_device_usage.hide()
-            self.view.label_device_title.setText("CPU")
-            self.view.label_device_percent.setText("")
-            self.view.label_runtime_info.setText("Device: CPU training")
-            return
-        if self._gpu_monitor_available is not True:
-            self.apply_gpu_memory_fallback()
-        self._gpu_monitor.poll()
-
-    def apply_gpu_snapshot(self, snapshot: GpuUsageSnapshot):
-        self._gpu_monitor_available = True
-        memory_percent = max(0.0, min(snapshot.memory_percent, 100.0))
-        used_gb = snapshot.memory_used_mb / 1024.0
-        total_gb = snapshot.memory_total_mb / 1024.0
-        self.view.progress_device_usage.show()
-        self.view.progress_device_usage.setValue(int(round(memory_percent)))
-        self.view.label_device_title.setText("GPU Mem")
-        self.view.label_device_percent.setText(f'{memory_percent:.0f}%')
-        self.view.label_runtime_info.setText(f'{used_gb:.1f}/{total_gb:.1f} GB ({memory_percent:.0f}%)')
-        self.view.label_runtime_info.setToolTip(snapshot.name)
-
-    def handle_gpu_monitor_unavailable(self, _: str):
-        self._gpu_monitor_available = False
-        self.apply_gpu_memory_fallback()
-
-    def apply_gpu_memory_fallback(self):
-        gpu_stats = self.sample_gpu_memory_stats()
-        if gpu_stats is None:
-            self.view.progress_device_usage.hide()
-            self.view.label_device_title.setText("CPU")
-            self.view.label_device_percent.setText("")
-            self.view.label_runtime_info.setText("Device: CPU training")
-            return
-        self.view.progress_device_usage.show()
-        self.view.progress_device_usage.setValue(int(round(max(0, min(gpu_stats["memory_percent"], 100)))))
-        self.view.label_device_title.setText("GPU Mem")
-        self.view.label_device_percent.setText(f'{gpu_stats["memory_percent"]:.0f}%')
-        self.view.label_runtime_info.setText(gpu_stats["text"])
-        self.view.label_runtime_info.setToolTip(gpu_stats["device_name"])
-
-    def update_epoch(self, current_epoch: int, current_ckpt_path: str):
-        self.view.progress_epoch.setValue(current_epoch)
-        self._current_epoch_for_eta = current_epoch + 1
-        self.view.progress_iter.setValue(0)
-        self.view.progress_iter.setStyleSheet(gui_util.get_dark_style())
-        self._worker.save_records_after_epoch(current_epoch, current_ckpt_path)
-        self.refresh_training_time(current_epoch)
-        self.view._refresh_training_chart(self._worker.get_train_summary(), self._worker.get_train_result_summary(), self._worker.get_valid_result_summary())
-        self.view._refresh_training_history_table(self._worker.get_train_summary(), self._worker.get_train_result_summary(), self._worker.get_valid_result_summary())
-        self.view._refresh_validation_table(current_epoch, self._worker.get_valid_result_summary())
-
-    def update_iter(self, phase_type: str, iter_idx: int, iter_len: int):
-        if phase_type == PHASE_TYPE_TRAINING:
-            self.view.progress_iter.setStyleSheet(self.view.COLOR_TRAINING)
-        elif phase_type == PHASE_TYPE_VALIDATION:
-            self.view.progress_iter.setStyleSheet(self.view.COLOR_VALIDATION)
-        else:
-            raise NotImplementedError
-        self.view.progress_iter.setMaximum(iter_len)
-        self.view.progress_iter.setValue(iter_idx + 1)
-        now = time.monotonic()
-        is_last_iter = iter_len > 0 and (iter_idx + 1) >= iter_len
-        if is_last_iter or (now - self._last_iter_ui_update_ts) >= 0.15:
-            self._last_iter_ui_update_ts = now
-            self.refresh_training_time_live(phase_type, iter_idx, iter_len)
-
-    def close(self):
-        self.stop_training("window close")
-
+    @staticmethod
+    def _get_torch():
+        import torch
+        return torch
