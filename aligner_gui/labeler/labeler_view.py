@@ -104,6 +104,12 @@ class LabelerView(QMainWindow):
 
         # Whether we need to save or not.
         self._dirty = False
+        # Per-image modification tracking
+        self._modified_paths: set[str] = set()
+        # Serialized shapes for images navigated away from while dirty: path -> list[raw_dict]
+        self._pending_save_cache: dict[str, list] = {}
+        # Last known label-state per path (for re-rendering with dirty flag)
+        self._file_item_states: dict[str, tuple] = {}  # path -> (has_label, is_empty, needs_confirm)
 
         self.isEnableCreate = True
         self.isEnableCreateRo = True
@@ -487,7 +493,7 @@ class LabelerView(QMainWindow):
         self.viewmodel.image_index_failed.connect(self._on_image_index_failed)
 
         # file list state
-        self.viewmodel.file_list_cleared.connect(self._file_list_widget.clear)
+        self.viewmodel.file_list_cleared.connect(self._on_file_list_cleared)
         self.viewmodel.file_list_batch_ready.connect(self._on_file_list_batch_ready)
         self.viewmodel.file_list_enabled_changed.connect(self._file_list_widget.setEnabled)
         self.viewmodel.file_list_item_state_changed.connect(self._on_file_list_item_state_changed)
@@ -574,12 +580,30 @@ class LabelerView(QMainWindow):
 
     def _set_dirty(self):  # It means there are someting to save
         self._dirty = True
-        if self._autoSaving == True:
+        if self._current_image_path:
+            self._modified_paths.add(self._current_image_path)
+            self._refresh_file_item_dirty(self._current_image_path)
+        if self._autoSaving:
             self._autosave_timer.start()
 
     def _set_clean(self):
         self._dirty = False
         self._autosave_timer.stop()
+        _path = self._current_image_path
+        if _path and _path in self._modified_paths:
+            self._modified_paths.discard(_path)
+            self._pending_save_cache.pop(_path, None)
+            self._refresh_file_item_dirty(_path)
+
+    def _refresh_file_item_dirty(self, path: str) -> None:
+        """Re-apply file list item color to reflect current dirty state."""
+        state = self._file_item_states.get(path)
+        if state is None:
+            return
+        has_label, is_empty, needs_confirm = state
+        is_dirty = path in self._modified_paths
+        for item in self._file_list_widget.findItems(path, Qt.MatchExactly):
+            self._apply_file_item_style(item, has_label, is_empty, needs_confirm, is_dirty)
 
     def _flush_autosave(self):
         if self._dirty and self._current_image_path is not None:
@@ -1006,7 +1030,25 @@ class LabelerView(QMainWindow):
             self._loading_file = False
 
     def _load_file_impl(self, file_path=None, is_load_after_delete=False):
+        _prev_path = self._current_image_path
         prev_shapes = self.canvas.get_shape()
+
+        # Cache serialized shapes for the image we're navigating away from
+        # so that Save Selected can save it later without accessing Qt objects.
+        if self._dirty and _prev_path is not None and not self._current_image.isNull():
+            _raw_cache: list = []
+            for _s in prev_shapes:
+                if len(_s.points) >= 4:
+                    _raw_cache.append({
+                        'x1': _s.points[0].x(), 'y1': _s.points[0].y(),
+                        'x2': _s.points[1].x(), 'y2': _s.points[1].y(),
+                        'x3': _s.points[2].x(), 'y3': _s.points[2].y(),
+                        'x4': _s.points[3].x(), 'y4': _s.points[3].y(),
+                        'label': _s.get_label(),
+                        'isRotated': _s.isRotated,
+                    })
+            self._pending_save_cache[_prev_path] = _raw_cache
+
         self.resetState()
         self.canvas.setEnabled(False)
         if file_path is None:
@@ -1193,39 +1235,41 @@ class LabelerView(QMainWindow):
         )
 
     def _save_selected_labels(self, _value=False):
-        target_paths = self._get_selected_paths()
-        if not target_paths or self._current_image_path is None:
+        selected_paths = set(self._get_selected_paths())
+        if not selected_paths:
             return
-        selected_shapes = self.canvas.get_shape()
+
+        # Serialize current image's shapes and add to cache if dirty
+        if self._dirty and self._current_image_path and not self._current_image.isNull():
+            _cur_raw: list = []
+            for _s in self.canvas.get_shape():
+                if len(_s.points) >= 4:
+                    _cur_raw.append({
+                        'x1': _s.points[0].x(), 'y1': _s.points[0].y(),
+                        'x2': _s.points[1].x(), 'y2': _s.points[1].y(),
+                        'x3': _s.points[2].x(), 'y3': _s.points[2].y(),
+                        'x4': _s.points[3].x(), 'y4': _s.points[3].y(),
+                        'label': _s.get_label(),
+                        'isRotated': _s.isRotated,
+                    })
+            self._pending_save_cache[self._current_image_path] = _cur_raw
+
+        # Only save images that have actually been modified
+        target_paths = list(selected_paths & self._modified_paths)
+        if not target_paths:
+            self.status("No modified images in selection — nothing to save.", 3000)
+            return
+
         if len(target_paths) > 1:
             msg = self.tr(
-                "Save current labels to {} selected images?\r\n"
-                "Existing label files of those images will be overwritten."
+                "Save modified labels to {} image(s)?\r\n"
+                "Only images you have actually changed will be written."
             ).format(len(target_paths))
             if QMessageBox.warning(self, self.tr("Attention"), msg,
                                    QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
                 return
 
-        saved_paths: list[str] = []
-        failed_paths: list[str] = []
-
-        # ── All Qt-object access MUST happen on the main thread ──────────────
-        # 1. Serialize shape coordinates to plain Python dicts (no QPointF).
-        # 2. Pre-compute image dimensions from QImage.
-        # The background thread then only handles pure-Python data + file I/O,
-        # which is completely safe regardless of platform.
-        raw_shapes: list = []
-        for shape in selected_shapes:
-            if len(shape.points) >= 4:
-                raw_shapes.append({
-                    'x1': shape.points[0].x(), 'y1': shape.points[0].y(),
-                    'x2': shape.points[1].x(), 'y2': shape.points[1].y(),
-                    'x3': shape.points[2].x(), 'y3': shape.points[2].y(),
-                    'x4': shape.points[3].x(), 'y4': shape.points[3].y(),
-                    'label': shape.get_label(),
-                    'isRotated': shape.isRotated,
-                })
-
+        # Pre-compute image info on the main thread (no Qt objects in background)
         _image_info_cache: dict = {}
         for _p in target_paths:
             if _p == self._current_image_path and not self._current_image.isNull():
@@ -1241,11 +1285,21 @@ class LabelerView(QMainWindow):
                     if not _img.isNull() else (0, 0, False)
                 )
 
-        def _get_image_info(path: str) -> tuple[int, int, bool]:
+        def _get_image_info(path: str) -> tuple:
             return _image_info_cache.get(path, (0, 0, False))
+
+        # Snapshot shape counts now (cache may be mutated before callbacks run)
+        _shape_counts = {p: len(self._pending_save_cache.get(p, [])) for p in target_paths}
+
+        saved_paths: list[str] = []
+        failed_paths: list[str] = []
 
         def work(idx: int):
             target_path = target_paths[idx]
+            raw_shapes = self._pending_save_cache.get(target_path)
+            if raw_shapes is None:
+                failed_paths.append(target_path)
+                return
             try:
                 self.viewmodel.save_raw_shapes_to_path(target_path, raw_shapes, _get_image_info)
                 saved_paths.append(target_path)
@@ -1257,11 +1311,19 @@ class LabelerView(QMainWindow):
         dlg.exec_()
 
         for path in saved_paths:
+            self._modified_paths.discard(path)
+            self._pending_save_cache.pop(path, None)
             self.viewmodel.mark_path_as_saved(
-                path, has_label=True, is_empty=(len(raw_shapes) == 0), needs_confirm=False
+                path,
+                has_label=True,
+                is_empty=(_shape_counts.get(path, 0) == 0),
+                needs_confirm=False,
             )
         if self._current_image_path in saved_paths:
-            self._set_clean()
+            # mark_path_as_saved already removed from _modified_paths above;
+            # just clear the dirty flag and stop the autosave timer
+            self._dirty = False
+            self._autosave_timer.stop()
         if failed_paths:
             gui_util.get_message_box(
                 self, "Batch Save",
@@ -1418,22 +1480,34 @@ class LabelerView(QMainWindow):
             self._image_index_progress = None
         gui_util.get_message_box(self, "Indexing Failed", "Failed to scan image labels.")
 
+    def _on_file_list_cleared(self) -> None:
+        self._file_list_widget.clear()
+        self._file_item_states.clear()
+
     def _on_file_list_batch_ready(self, batch: list) -> None:
         self._file_list_widget.setUpdatesEnabled(False)
         for path, has_label, is_empty, needs_confirm in batch:
+            self._file_item_states[path] = (has_label, is_empty, needs_confirm)
             item = QListWidgetItem(path)
             item.setToolTip(path)
-            self._apply_file_item_style(item, has_label, is_empty, needs_confirm)
+            is_dirty = path in self._modified_paths
+            self._apply_file_item_style(item, has_label, is_empty, needs_confirm, is_dirty)
             self._file_list_widget.addItem(item)
         self._file_list_widget.setUpdatesEnabled(True)
 
     def _on_file_list_item_state_changed(
         self, path: str, has_label: bool, is_empty: bool, needs_confirm: bool
     ) -> None:
+        self._file_item_states[path] = (has_label, is_empty, needs_confirm)
+        is_dirty = path in self._modified_paths
         for item in self._file_list_widget.findItems(path, Qt.MatchExactly):
-            self._apply_file_item_style(item, has_label, is_empty, needs_confirm)
+            self._apply_file_item_style(item, has_label, is_empty, needs_confirm, is_dirty)
 
     def _on_file_list_items_removed(self, removed_paths: set) -> None:
+        for path in removed_paths:
+            self._file_item_states.pop(path, None)
+            self._modified_paths.discard(path)
+            self._pending_save_cache.pop(path, None)
         for row in range(self._file_list_widget.count() - 1, -1, -1):
             item = self._file_list_widget.item(row)
             if self.tr(item.text()) in removed_paths:
@@ -1460,10 +1534,17 @@ class LabelerView(QMainWindow):
 
     @staticmethod
     def _apply_file_item_style(
-        item: QListWidgetItem, has_label: bool, is_empty: bool, needs_confirm: bool
+        item: QListWidgetItem,
+        has_label: bool,
+        is_empty: bool,
+        needs_confirm: bool,
+        is_dirty: bool = False,
     ) -> None:
         """Apply color coding to a file list item based on label state."""
-        if not has_label:
+        if is_dirty:
+            foreground = QColor(255, 210, 80)   # amber — unsaved changes
+            background = QColor(50, 44, 14)
+        elif not has_label:
             foreground = QColor(235, 92, 92)
             background = QColor(62, 24, 28)
         elif is_empty:
