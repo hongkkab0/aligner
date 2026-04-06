@@ -138,7 +138,6 @@ class TesterView(QWidget, Ui_tester_widget):
         self._last_preview_key = None
 
     def _refresh_current_preview(self):
-        self._last_preview_key = None
         indexes = self.table_test_detail.selectedIndexes()
         if len(indexes) > 0:
             idx = indexes[0].row()

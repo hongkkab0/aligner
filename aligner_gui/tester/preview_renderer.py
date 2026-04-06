@@ -33,7 +33,6 @@ class TesterPreviewRenderer:
         self._label_cache: OrderedDict[str, object] = OrderedDict()
         self._preview_cache_size = max(1, int(preview_cache_size))
         self._label_cache_size = max(1, int(label_cache_size))
-        self._colormap = None
 
     def clear(self):
         self._image_reader.clear()
@@ -93,6 +92,8 @@ class TesterPreviewRenderer:
                     thickness,
                     font_size,
                 )
+            if show_gt or show_prediction:
+                self._draw_legend(painter, class_index, image.shape[1], image.shape[0], font_size)
         finally:
             painter.end()
 
@@ -115,6 +116,31 @@ class TesterPreviewRenderer:
             return 5, 20
         return 6, 20
 
+    # Visually distinct color palette (R, G, B) — cycles if > 18 classes
+    _PALETTE = [
+        (255,  70,  70),   # 0  red
+        ( 70, 160, 255),   # 1  blue
+        ( 70, 210,  70),   # 2  green
+        (255, 200,  40),   # 3  yellow
+        (180,  70, 255),   # 4  purple
+        (255, 140,  40),   # 5  orange
+        ( 50, 210, 190),   # 6  teal
+        (255, 100, 190),   # 7  pink
+        (150, 210,  60),   # 8  lime
+        (130, 130, 255),   # 9  lavender
+        (255,  70, 140),   # 10 rose
+        ( 50, 180, 130),   # 11 seafoam
+        (230, 180,  70),   # 12 gold
+        (210,  80, 110),   # 13 crimson
+        ( 90, 200, 255),   # 14 sky blue
+        (210, 140,  60),   # 15 caramel
+        (160, 255, 130),   # 16 mint
+        (255, 130,  70),   # 17 coral
+    ]
+
+    def _get_color(self, idx: int) -> tuple:
+        return self._PALETTE[idx % len(self._PALETTE)]
+
     def _draw_gt_overlay(self, painter: QPainter, img_path: str, class_index: dict, thickness: int, font_size: int):
         label = self._get_label_data(img_path)
         if label is None:
@@ -122,12 +148,14 @@ class TesterPreviewRenderer:
 
         no_rotation = self._settings_provider().no_rotation
         painter.setFont(QFont("Arial", font_size))
-        gt_pen = QPen(QColor(0, 255, 120), thickness, Qt.DashLine)
-        gt_fill = QColor(0, 255, 120, 24)
         for shape in label.get("shapes", []):
             class_name = shape.get("label", "")
             if class_name not in class_index:
                 continue
+            class_idx = class_index[class_name]
+            r, g, b = self._get_color(class_idx)
+            gt_pen  = QPen(QColor(r, g, b), thickness, Qt.DashLine)
+            gt_fill = QColor(r, g, b, 24)
             qbox = [
                 shape["x1"], shape["y1"],
                 shape["x2"], shape["y2"],
@@ -160,9 +188,9 @@ class TesterPreviewRenderer:
             if class_name not in class_index:
                 continue
             class_idx = class_index[class_name]
-            color = self._get_color(class_idx)
-            pred_pen = QPen(QColor(color[0], color[1], color[2]), thickness)
-            pred_fill = QColor(color[0], color[1], color[2], 32)
+            r, g, b = self._get_color(class_idx)
+            pred_pen  = QPen(QColor(r, g, b), thickness, Qt.SolidLine)
+            pred_fill = QColor(r, g, b, 32)
             painter.save()
             painter.setBrush(pred_fill)
             self._draw_qbox(
@@ -173,6 +201,67 @@ class TesterPreviewRenderer:
                 text_offset=0,
             )
             painter.restore()
+
+    def _draw_legend(self, painter: QPainter, class_index: dict, image_w: int, image_h: int, font_size: int):
+        """Draw a color-coded class legend in the top-left corner."""
+        if not class_index:
+            return
+
+        classes = sorted(class_index.items(), key=lambda kv: kv[1])   # [(name, idx), ...]
+        n = len(classes)
+
+        margin    = max(6, font_size // 2)
+        swatch_w  = max(16, font_size)
+        swatch_h  = max(12, font_size - 2)
+        text_pad  = 6
+        row_h     = swatch_h + 4
+        header_h  = font_size + 6          # room for "━ Pred  -- GT" header
+
+        # Measure widest class name to size the background rect
+        painter.setFont(QFont("Arial", font_size - 2))
+        fm = painter.fontMetrics()
+        max_text_w = max(fm.width(name) for name, _ in classes)
+        box_w = swatch_w + text_pad + max_text_w + margin * 2
+        box_h = header_h + n * row_h + margin * 2
+
+        # Clamp to image bounds
+        x0 = margin
+        y0 = margin
+        box_w = min(box_w, image_w - 2 * margin)
+        box_h = min(box_h, image_h - 2 * margin)
+
+        # Semi-transparent background
+        painter.save()
+        painter.setOpacity(0.72)
+        painter.setBrush(QColor(20, 20, 20))
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(x0, y0, box_w, box_h, 4, 4)
+        painter.setOpacity(1.0)
+
+        # Header: style guide
+        header_font = QFont("Arial", font_size - 3)
+        painter.setFont(header_font)
+        painter.setPen(QColor(200, 200, 200))
+        painter.drawText(x0 + margin, y0 + margin + font_size - 4,
+                         "━ Pred    - - GT")
+
+        # One row per class
+        for row, (class_name, class_idx) in enumerate(classes):
+            r, g, b = self._get_color(class_idx)
+            ry = y0 + margin + header_h + row * row_h
+            sx = x0 + margin
+            # Solid swatch (Pred style)
+            painter.setPen(QPen(QColor(r, g, b), 2, Qt.SolidLine))
+            painter.setBrush(QColor(r, g, b, 80))
+            painter.drawRect(sx, ry, swatch_w, swatch_h)
+            # Class name
+            painter.setFont(QFont("Arial", font_size - 2))
+            painter.setPen(QColor(r, g, b))
+            painter.drawText(sx + swatch_w + text_pad,
+                             ry + swatch_h - 2,
+                             class_name)
+
+        painter.restore()
 
     def _draw_qbox(self, painter: QPainter, qbox, text: str, pen: QPen, text_offset: int = -4):
         painter.setPen(pen)
@@ -185,13 +274,6 @@ class TesterPreviewRenderer:
         painter.drawPolygon(polygon)
         if text:
             painter.drawText(qbox[0], qbox[1] + text_offset, text)
-
-    def _get_color(self, idx: int):
-        if self._colormap is None:
-            import imgviz
-
-            self._colormap = imgviz.label_colormap(value=1.5)
-        return self._colormap[(idx + 3) % len(self._colormap)]
 
     def _get_label_data(self, img_path: str):
         normalized_path = os.path.abspath(img_path)

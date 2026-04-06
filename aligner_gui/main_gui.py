@@ -152,5 +152,6 @@ if __name__ == '__main__':
     #     cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, startupinfo=startupinfo).communicate()
 
     os.chdir(ROOT_PATH)  # change working directory
+    print("sys.path:", sys.path)
     main_window = main()
 
