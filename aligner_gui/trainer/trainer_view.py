@@ -261,19 +261,19 @@ class TrainerView(QWidget, Ui_trainer_widget):
         layout.setSpacing(6)
         layout.setAlignment(Qt.AlignTop)
 
-        self.label_device_title = QLabel("VRAM 현황")
-        self.label_device_title.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.label_device_title)
+        # Top label shows live VRAM info (e.g. "3.8 / 8.0 GB  47%")
+        # instead of a static title — updated by _on_device_usage_updated.
+        self.label_runtime_info = QLabel("VRAM --/--")
+        self.label_runtime_info.setAlignment(Qt.AlignCenter)
+        self.label_runtime_info.setStyleSheet(
+            "color: rgb(200, 210, 220); font-weight: 600;"
+        )
+        self.label_runtime_info.setWordWrap(False)
+        layout.addWidget(self.label_runtime_info)
 
         self.progress_device_usage = _GpuMemBar()
         self.progress_device_usage.hide()
         layout.addWidget(self.progress_device_usage, alignment=Qt.AlignHCenter)
-
-        self.label_runtime_info = QLabel("VRAM --/--")
-        self.label_runtime_info.setAlignment(Qt.AlignCenter)
-        self.label_runtime_info.setStyleSheet("color: rgb(170, 180, 190);")
-        self.label_runtime_info.setWordWrap(False)
-        layout.addWidget(self.label_runtime_info)
         layout.addStretch(1)
 
         self.layout_visualization.addWidget(self.device_panel)
@@ -400,7 +400,6 @@ class TrainerView(QWidget, Ui_trainer_widget):
         else:
             self.label_time.setText("Preparing training...")
 
-        self.label_device_title.setText("VRAM 현황")
         self.label_runtime_info.setText("VRAM --/--")
 
         if is_resume and start_epoch > 0:
@@ -443,7 +442,6 @@ class TrainerView(QWidget, Ui_trainer_widget):
 
         self.progress_device_usage.hide()
         self.progress_device_usage.setValue(0)
-        self.label_device_title.setText("VRAM 현황")
         self.label_runtime_info.setText("VRAM --/--")
 
     def _on_epoch_updated(self, epoch: int, _ckpt_path: str) -> None:
@@ -489,12 +487,12 @@ class TrainerView(QWidget, Ui_trainer_widget):
     def _on_device_usage_updated(self, info: dict) -> None:
         if not info.get("visible", False):
             self.progress_device_usage.hide()
-            self.label_device_title.setText(info.get("title", "CPU"))
+            # Show device mode text (e.g. "Device: CPU training") as the header
             self.label_runtime_info.setText(info.get("info", ""))
             return
         self.progress_device_usage.show()
         self.progress_device_usage.setValue(info.get("value", 0))
-        self.label_device_title.setText(info.get("title", "VRAM 현황"))
+        # Show live VRAM info (e.g. "3.8 / 8.0 GB  (47%)") at the top
         self.label_runtime_info.setText(info.get("info", ""))
         self.label_runtime_info.setToolTip(info.get("tooltip", ""))
 
