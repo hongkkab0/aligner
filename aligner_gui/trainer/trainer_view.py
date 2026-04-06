@@ -4,13 +4,13 @@ import logging
 from typing import Callable
 
 from PyQt5 import QtGui
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QRect
+from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFrame,
     QLabel,
-    QProgressBar,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
@@ -26,6 +26,106 @@ from aligner_engine.summary import TrainSummary, ResultSummary
 from aligner_engine.const import PHASE_TYPE_TRAINING, PHASE_TYPE_VALIDATION
 
 TRAIN_LOGGER = logging.getLogger("aligner.trainer")
+
+
+class _GpuMemBar(QWidget):
+    """Vertical GPU-memory gauge with proportional fill and 25/50/75 % tick marks.
+
+    Replaces the narrow stock QProgressBar so the fill level is clearly
+    distinguishable at a glance: 29 % vs 50 % vs 75 % produce obviously
+    different fill heights, and colour changes to amber / red at high load.
+    """
+
+    _BAR_W   = 34                          # fill column width (px)
+    _TICK_H  = 120                         # total drawable height
+    _TICK_LEN = 5                          # horizontal tick length (right side)
+    _TICK_PAD = 3                          # gap between tick and label
+
+    _COL_LOW    = QColor( 60, 170, 110)    # green  ≤ 70 %
+    _COL_MID    = QColor(220, 155,  35)    # amber  70–90 %
+    _COL_HIGH   = QColor(210,  60,  55)    # red    > 90 %
+    _COL_BG     = QColor( 28,  32,  38)
+    _COL_BORDER = QColor( 64,  74,  86)
+    _COL_TICK   = QColor( 85, 100, 115)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._value = 0
+        # Reserve space for the tick labels ("75%", "50%", "25%")
+        fm = QFontMetrics(self._tick_font())
+        label_w = fm.boundingRect("100%").width() + 2
+        self.setFixedSize(self._BAR_W + self._TICK_LEN + self._TICK_PAD + label_w,
+                          self._TICK_H)
+
+    def setValue(self, pct: int) -> None:
+        self._value = max(0, min(pct, 100))
+        self.update()
+
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _tick_font() -> QFont:
+        f = QFont()
+        f.setPointSize(7)
+        return f
+
+    def paintEvent(self, _event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+
+        W = self._BAR_W
+        H = self._TICK_H
+        PAD = 2          # inner vertical padding so the bar has a little room
+
+        # ── background ─────────────────────────────────────────────────
+        p.setPen(QPen(self._COL_BORDER, 1))
+        p.setBrush(self._COL_BG)
+        p.drawRoundedRect(QRect(0, 0, W - 1, H - 1), 4, 4)
+
+        # ── coloured fill (bottom → top) ────────────────────────────────
+        drawable_h = H - 2 * PAD
+        fill_h = round(drawable_h * self._value / 100)
+        if fill_h > 0:
+            v = self._value
+            color = (self._COL_HIGH if v > 90
+                     else self._COL_MID if v > 70
+                     else self._COL_LOW)
+            p.setPen(Qt.NoPen)
+            p.setBrush(color)
+            p.drawRoundedRect(
+                QRect(2, H - PAD - fill_h, W - 4, fill_h), 3, 3
+            )
+
+        # ── dashed guide lines + right-side ticks + labels ─────────────
+        tick_font = self._tick_font()
+        p.setFont(tick_font)
+        fm = QFontMetrics(tick_font)
+        text_h = fm.ascent()
+
+        dash_pen = QPen(self._COL_TICK, 1, Qt.DotLine)
+        solid_pen = QPen(self._COL_TICK, 1, Qt.SolidLine)
+
+        for mark in (75, 50, 25):
+            # pixel y-coordinate for this mark (0 % = bottom, 100 % = top)
+            y = PAD + round((H - 2 * PAD) * (1 - mark / 100))
+
+            # dashed horizontal guide across the bar face
+            p.setPen(dash_pen)
+            p.drawLine(1, y, W - 2, y)
+
+            # solid tick on the right edge
+            p.setPen(solid_pen)
+            p.drawLine(W, y, W + self._TICK_LEN, y)
+
+            # label text
+            p.setPen(QPen(self._COL_TICK, 1))
+            p.drawText(
+                W + self._TICK_LEN + self._TICK_PAD,
+                y + text_h // 2,
+                f"{mark}%",
+            )
+
+        p.end()
 
 
 class TrainerView(QWidget, Ui_trainer_widget):
@@ -45,19 +145,6 @@ class TrainerView(QWidget, Ui_trainer_widget):
 
     COLOR_TRAINING = """QProgressBar::chunk { background: red; }"""
     COLOR_VALIDATION = """QProgressBar::chunk { background: green; }"""
-    DEVICE_BAR_STYLE = """
-    QProgressBar {
-        background-color: rgb(28, 32, 38);
-        border: 1px solid rgb(64, 74, 86);
-        border-radius: 6px;
-        padding: 1px;
-    }
-    QProgressBar::chunk {
-        background-color: rgb(60, 170, 110);
-        border-radius: 4px;
-        margin: 1px;
-    }
-    """
 
     def __init__(
         self,
@@ -161,13 +248,7 @@ class TrainerView(QWidget, Ui_trainer_widget):
         self.label_device_title.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.label_device_title)
 
-        self.progress_device_usage = QProgressBar()
-        self.progress_device_usage.setOrientation(Qt.Vertical)
-        self.progress_device_usage.setFixedSize(20, 118)
-        self.progress_device_usage.setRange(0, 100)
-        self.progress_device_usage.setTextVisible(False)
-        self.progress_device_usage.setInvertedAppearance(False)
-        self.progress_device_usage.setStyleSheet(self.DEVICE_BAR_STYLE)
+        self.progress_device_usage = _GpuMemBar()
         self.progress_device_usage.hide()
         layout.addWidget(self.progress_device_usage, alignment=Qt.AlignHCenter)
 
