@@ -232,6 +232,7 @@ class Worker:
         from mmrotate.utils import register_all_modules
         from mmengine.config import Config
         from aligner_engine.hooks.dice_gui_callback_hook import DICECallbackHook
+        from aligner_engine.hooks.dice_close_aug_hook import DiceCloseAugHook  # registers to HOOKS
         from aligner_engine.mm_rotate_det.dice.dice_rotate_det_runner import DiceRotateDetRunner
 
         settings = self._project_settings
@@ -393,6 +394,52 @@ class Worker:
 
         cfg.train_dataloader.dataset.pipeline = train_pipeline
         cfg.val_dataloader.dataset.pipeline = valid_pipeline
+
+        # ── Augmentation annealing (Close-Aug hook) ───────────────────────
+        # For the final ~15 % of training (minimum 10 epochs), switch to a
+        # lighter pipeline that omits Mosaic, Copy-Paste, and scale jitter.
+        # This lets the model fine-tune on inference-like, real-scale images
+        # and consistently improves the final mAP.
+        _close_epochs = max(10, int(settings.max_epochs * 0.15))
+        _close_aug_epoch = max(1, settings.max_epochs - _close_epochs)
+
+        _close_aug_pipeline = [
+            dict(type='mmdet.LoadImageFromFile', backend_args=None),
+            dict(type='mmdet.LoadAnnotations', with_bbox=True, box_type='qbox'),
+            dict(type='ConvertBoxType', box_type_mapping=dict(gt_bboxes='rbox')),
+            # Fixed resize only — no mosaic, no scale jitter
+            dict(type='mmdet.Resize', scale=rescale_size, keep_ratio=True),
+            dict(type='mmdet.Pad', size=rescale_size, pad_val=114),
+            # Lighter photometric aug (lower noise intensity)
+            dict(type='DicePhotoMetricDistortion'),
+            dict(type='DiceGaussianNoise', prob=0.3),
+        ]
+        if random_flip_directions:
+            _close_aug_pipeline.append(
+                dict(type='mmdet.RandomFlip', prob=0.5,
+                     direction=random_flip_directions)
+            )
+        if not settings.no_rotation:
+            _close_aug_pipeline.append(
+                dict(type='DiceRandomRotate', prob=0.9)
+            )
+        _close_aug_pipeline.extend([
+            dict(type='DiceRandomShift', prob=0.5),
+            # Fewer erasing patches — protect small objects near convergence
+            dict(type='DiceRandomErasing', n_patches=4, ratio=(0.02, 0.04)),
+            dict(type='mmdet.PackDetInputs'),
+        ])
+
+        # Remove any existing DiceCloseAugHook before adding a fresh one
+        cfg.custom_hooks = [
+            h for h in cfg.custom_hooks
+            if h.get('type') != 'DiceCloseAugHook'
+        ]
+        cfg.custom_hooks.append(dict(
+            type='DiceCloseAugHook',
+            close_aug_epoch=_close_aug_epoch,
+            close_aug_pipeline=_close_aug_pipeline,
+        ))
 
         # On Windows, dataloader worker spawning can dominate the initial
         # "first batch" delay and make the UI feel unresponsive.
