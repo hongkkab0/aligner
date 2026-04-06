@@ -427,16 +427,10 @@ class Worker:
 
     def stop_training(self):
         # Only set the quit flag — this is the only thread-safe operation.
-        # Cleanup (logger, runner) must happen inside the training thread
-        # via cleanup_after_stop(), which is called from ThreadTrain.run()
-        # after the stop exception is caught.
+        # Logger cleanup is done by the training thread (ThreadTrain.run)
+        # after the stop exception is caught, via close_logger().
         if self._stop_loop_hook is not None:
             self._stop_loop_hook.quit()
-
-    def cleanup_after_stop(self):
-        """Called from the training thread after the user-stop exception is caught."""
-        self.close_logger()
-        self._runner = None
 
     def success_training(self):
         self.close_logger()

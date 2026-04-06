@@ -192,11 +192,6 @@ class TrainerView(QWidget, Ui_trainer_widget):
         self._build_device_panel()
         self._init_model_profile_ui()
 
-        self._busy_indicator = QtGui.QMovie(
-            "aligner_gui\\icons\\essential\\ajax-loader_indicator_big_white.gif"
-        )
-        self.lbl_train_indicator.setMovie(self._busy_indicator)
-        self._busy_indicator.start()
         self.lbl_train_indicator.hide()
 
         # ------------------------------------------------------------------
@@ -416,7 +411,7 @@ class TrainerView(QWidget, Ui_trainer_widget):
         self.progress_iter.setMaximum(1)
         self.progress_iter.setValue(0)
         self.progress_iter.setStyleSheet(gui_util.get_dark_style())
-        self.lbl_train_indicator.show()
+        self.lbl_train_indicator.hide()
 
         self._set_training_controls_enabled(False)
         self.check_resume.setEnabled(False)
