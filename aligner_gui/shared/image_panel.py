@@ -349,7 +349,17 @@ class ImagePanel(QLabel):
     def _restoreCursor(self):
         QApplication.restoreOverrideCursor()
 
-    def setImage(self, pixmap):
+    def setImage(self, pixmap, preserve_zoom: bool = False):
+        """Set the displayed image.
+
+        Parameters
+        ----------
+        preserve_zoom:
+            When ``True`` the current scale/offset are kept so the user's
+            zoom and pan state survives overlay-only refreshes (e.g. toggling
+            the GT / Pred visibility checkboxes).  When ``False`` (default)
+            the view is reset to fit the new image.
+        """
         try:
             image_size = pixmap.size()
             frame_size = self.size()
@@ -357,16 +367,18 @@ class ImagePanel(QLabel):
             if image_size.width() == 0 or image_size.height() == 0:
                 return
 
-            tmp_scale_x = frame_size.width() / image_size.width()
-            tmp_scale_y = frame_size.height() / image_size.height()
+            if not preserve_zoom:
+                tmp_scale_x = frame_size.width() / image_size.width()
+                tmp_scale_y = frame_size.height() / image_size.height()
 
-            if tmp_scale_x < tmp_scale_y:
-                self._scale = tmp_scale_x
-            else:
-                self._scale = tmp_scale_y
+                if tmp_scale_x < tmp_scale_y:
+                    self._scale = tmp_scale_x
+                else:
+                    self._scale = tmp_scale_y
 
-            self._offset = QPoint(0, 0)
-            self._last_offset = QPoint(0, 0)
+                self._offset = QPoint(0, 0)
+                self._last_offset = QPoint(0, 0)
+
             self._pressed_point = QPoint(0, 0)
             self.roi_table = dict()
             self.cur_roi_class = 0
@@ -375,7 +387,7 @@ class ImagePanel(QLabel):
             self.sel_roi = QRect()
             self.roi_clicked_pos = 0
             self.image = pixmap
-            self._auto_fit = True
+            self._auto_fit = not preserve_zoom
             self._is_panning = False
             self._pan_button = Qt.NoButton
             self.update()

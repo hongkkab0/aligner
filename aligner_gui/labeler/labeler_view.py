@@ -444,9 +444,7 @@ class LabelerView(QMainWindow):
         self._select_all_files_shortcut.activated.connect(self._select_all_files_in_list)
         self._file_list_select_all_shortcut = QShortcut(QKeySequence.SelectAll, self._file_list_widget)
         self._file_list_select_all_shortcut.activated.connect(self._select_all_files_in_list)
-        self._save_selected_shortcut = QShortcut(QKeySequence("Ctrl+Shift+S"), self)
-        self._save_selected_shortcut.setContext(Qt.WindowShortcut)
-        self._save_selected_shortcut.activated.connect(self._save_selected_labels)
+        # Note: Ctrl+Shift+S is already handled by the save_selected QAction shortcut;
         # Add Chris
         self.difficult = False
 
@@ -993,6 +991,15 @@ class LabelerView(QMainWindow):
 
     def _load_file(self, file_path=None, is_load_after_delete=False):
         """Load the specified file, or the last opened file if None."""
+        if getattr(self, '_loading_file', False):
+            return False  # Prevent re-entrant calls (e.g. from setSelected inside this method)
+        self._loading_file = True
+        try:
+            return self._load_file_impl(file_path, is_load_after_delete)
+        finally:
+            self._loading_file = False
+
+    def _load_file_impl(self, file_path=None, is_load_after_delete=False):
         prev_shapes = self.canvas.get_shape()
         self.resetState()
         self.canvas.setEnabled(False)
@@ -1528,9 +1535,16 @@ class LabelerView(QMainWindow):
 
     def _item_selected_changed_file_list(self):
         indexes = self._file_list_widget.selectedIndexes()
-        if len(indexes) > 0:
-            item = self._file_list_widget.item(indexes[0].row())
-            self._file_list_widget.scrollToItem(item)
+        if not indexes:
+            return
+        item = self._file_list_widget.item(indexes[0].row())
+        self._file_list_widget.scrollToItem(item)
+        # When exactly one item is selected and we're not already inside _load_file
+        # (handles arrow key navigation in addition to mouse clicks)
+        if len(indexes) == 1 and not getattr(self, '_loading_file', False):
+            target_path = self.tr(item.text())
+            if target_path != self._current_image_path:
+                self._load_file(target_path)
 
 
 class ElideLeftDelegate(QStyledItemDelegate):
