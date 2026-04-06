@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from copy import deepcopy
 from typing import TYPE_CHECKING, Callable
 
 from PyQt5.QtCore import QTimer, pyqtSignal
@@ -333,7 +332,12 @@ class LabelerViewModel(ViewModelBase):
         """
         label_file_class = self._get_label_file_class()
         label_file = label_file_class(image_path)
-        label_file.set_shapes(deepcopy(shapes))
+        # Do NOT deepcopy here — this method is called from a background thread,
+        # and deepcopying PyQt5 value types (QPointF) from a non-main thread can
+        # silently produce zero-valued objects on some platforms (Windows).
+        # The caller is responsible for passing shapes that are already safe copies
+        # (created via deepcopy on the main thread before the background thread starts).
+        label_file.set_shapes(shapes)
         width, height, is_grayscale = get_image_info_fn(image_path)
         if width == 0 or height == 0:
             raise RuntimeError(f"Failed to read image: {image_path}")

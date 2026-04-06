@@ -12,8 +12,6 @@ from PyQt5.QtGui import *
 from PyQt5.QtCore import *
 from PyQt5.QtWidgets import *
 from aligner_gui.shared import io_util
-import cv2
-import numpy as np
 
 
 
@@ -66,16 +64,15 @@ class LabelFile(object):
                 shape.addPoint(QPointF(data_shape['x2'], data_shape['y2']))
                 shape.addPoint(QPointF(data_shape['x3'], data_shape['y3']))
                 shape.addPoint(QPointF(data_shape['x4'], data_shape['y4']))
-                center, (w, h), angle = cv2.minAreaRect(
-                    np.array([[data_shape['x1'], data_shape['y1']],
-                              [data_shape['x2'], data_shape['y2']],
-                              [data_shape['x3'], data_shape['y3']],
-                              [data_shape['x4'], data_shape['y4']]], dtype=np.float32))
-                if angle == 90:
-                    angle = 0
-                angle = angle * math.pi / 180
-
-                shape.direction = angle
+                # Compute direction from the p0→p1 edge vector.
+                # Using atan2 on the exact float coordinates is reliable and
+                # unambiguous, unlike cv2.minAreaRect which can swap sides and
+                # return a different-but-equivalent angle (causing wrong vertex
+                # placement when the user later resizes or rotates the shape).
+                shape.direction = math.atan2(
+                    data_shape['y2'] - data_shape['y1'],
+                    data_shape['x2'] - data_shape['x1'],
+                )
                 shape.isRotated = True
                 shape.close()
                 shapes.append(shape)
