@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from PyQt5.QtGui import *
 from PyQt5.QtCore import *

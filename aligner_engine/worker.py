@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import aligner_engine.utils as util
 from aligner_engine.default_project_config import get_default_project_config
